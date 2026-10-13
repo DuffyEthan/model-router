@@ -4,8 +4,6 @@ Cut your [Claude Code](https://claude.com/claude-code) costs and usage by sendin
 
 ![Demo: a real Claude Code session started on Opus. The status line shows each prompt routed to haiku, sonnet or opus, and /router shows the tally.](docs/demo.gif)
 
-*A real recording (made with [vhs](https://github.com/charmbracelet/vhs); script in [`docs/demo.tape`](docs/demo.tape)): a session started on Opus, with each prompt routed to the cheapest capable model. The last two prompts were interrupted after the routing decision to keep the demo short.*
-
 It comes in two forms:
 
 | | **Plugin** (recommended) | **`route` CLI** |
