@@ -1,0 +1,19 @@
+name: test
+on: [push, pull_request]
+jobs:
+  cli-and-installer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: CLI unit tests
+        run: python -m unittest discover -s cli/tests -v
+      - name: Installer syntax
+        run: sh -n install.sh
+      - name: Manifests are valid JSON
+        run: |
+          python -m json.tool .claude-plugin/marketplace.json > /dev/null
+          python -m json.tool plugin/.claude-plugin/plugin.json > /dev/null
+          python -m json.tool plugin/hooks/hooks.json > /dev/null

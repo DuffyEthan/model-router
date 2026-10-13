@@ -8,6 +8,7 @@ Usage:
     route "your prompt"            # classify, then open interactive Claude Code
     route -p "your prompt"         # classify, then run headless (print mode)
     route --dry-run "your prompt"  # only show the routing decision
+    route "your prompt" -- --permission-mode plan   # flags after -- go to claude
     echo "prompt" | route -p       # prompt from stdin
 """
 
@@ -90,7 +91,15 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="only show the routing decision")
     ap.add_argument("--model", help="skip routing and force a model")
     ap.add_argument("--effort", help="override the routed effort level")
-    args, passthrough = ap.parse_known_args()  # unknown flags go straight to claude
+    argv = sys.argv[1:]
+    # Everything after "--" goes to claude untouched (needed for flags that take
+    # a value, e.g. `-- --permission-mode plan`, which we can't tell from a prompt).
+    passthrough: list[str] = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, passthrough = argv[:i], argv[i + 1:]
+    args, extra = ap.parse_known_args(argv)  # other unknown flags (e.g. --flag=value) too
+    passthrough = extra + passthrough
 
     prompt = " ".join(args.prompt).strip()
     if not prompt and not sys.stdin.isatty():

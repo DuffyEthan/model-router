@@ -113,7 +113,7 @@ echo "prompt" | route -p       # prompt from stdin
 
 How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
 
-Other flags (`--permission-mode`, `--add-dir`, …) pass straight through to `claude`. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0003.
+To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0003.
 
 ## Tuning
 
@@ -161,8 +161,23 @@ plugin/                           # the Claude Code plugin
   hooks/hooks.json
   hooks/register.ts
 cli/route.py                      # the standalone `route` wrapper
+cli/tests/                        # CLI unit tests
+plugin/tests/                     # plugin tests (claude plugin test)
 install.sh                        # one-line installer
 ```
+
+## Tests
+
+```bash
+make test          # everything
+make test-cli      # Python unit tests for the route CLI (stdlib only)
+make test-plugin   # validates and tests the plugin with `claude plugin test` (no API calls)
+```
+
+- `plugin/tests/router.test.ts`: 15 tests that run the real plugin against a mocked engine. They cover routing to each tier, full model IDs (including provider prefixes), fail-safe behaviour (garbage replies, bad JSON, unknown models, a classifier that fails or throws), subagents being left alone, slash commands not being classified, and `/router on|off|status` including the saved off setting.
+- `cli/tests/test_route.py`: 18 tests for the CLI's classification, fallbacks, flag handling, stdin, and logging.
+
+CI runs the CLI tests and basic checks on every push. The plugin tests need the `claude` CLI, so run them locally.
 
 ## License
 
