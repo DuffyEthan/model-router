@@ -1,5 +1,7 @@
 # model-router
 
+![model-router: Haiku, Sonnet and Opus lanes with a router in front](docs/banner.jpg)
+
 Cut your [Claude Code](https://claude.com/claude-code) costs and usage by sending each prompt to the **cheapest model that can handle it**. Before your prompt is answered, Claude Haiku reads it on low effort and picks haiku, sonnet or opus plus an effort level. Trivial questions go to Haiku. Hard architecture work goes to Opus.
 
 ![Demo: a real Claude Code session started on Opus. The status line shows each prompt routed to haiku, sonnet or opus, and /router shows the tally.](docs/demo.gif)
