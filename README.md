@@ -163,6 +163,7 @@ plugin/                           # the Claude Code plugin
 cli/route.py                      # the standalone `route` wrapper
 cli/tests/                        # CLI unit tests
 plugin/tests/                     # plugin tests (claude plugin test)
+evals/                            # routing-quality and end-to-end evals (real model calls)
 install.sh                        # one-line installer
 ```
 
@@ -178,6 +179,31 @@ make test-plugin   # validates and tests the plugin with `claude plugin test` (n
 - `cli/tests/test_route.py`: 18 tests for the CLI's classification, fallbacks, flag handling, stdin, and logging.
 
 CI runs the CLI tests and basic checks on every push. The plugin tests need the `claude` CLI, so run them locally.
+
+These tests fake Haiku's replies, so they check the *plumbing*, not whether Haiku picks well. Routing quality is checked by the evals below.
+
+## Evals: does it route well?
+
+The evals make real model calls and cost a little.
+
+```bash
+python3 evals/routing_eval.py   # ~100 real Haiku classifications, ~$0.02
+python3 evals/e2e.py            # real plugin in real sessions; checks which model answered
+```
+
+- **`evals/routing_eval.py`** runs the plugin's actual router prompt (read from `register.ts`) on 33 labelled prompts in [`evals/cases.jsonl`](evals/cases.jsonl): 10 easy, 10 everyday coding, 10 hard, and 3 follow-ups with conversation context. Each runs 3 times to check consistency. It reports correct-tier rate, **under-routing** (too cheap, so a risk of weak answers) and **over-routing** (too expensive, so wasted money). Some borderline cases accept two tiers.
+- **`evals/e2e.py`** starts headless Claude Code sessions on `--model opus` with the plugin loaded, sends real prompts, and checks from the session's usage report which model actually answered.
+
+Latest results (Claude Code 2.1.296, Haiku 5.5, October 2026):
+
+| Eval | Result |
+|---|---|
+| Routing quality | **96/99 (97%)** correct tier; **0 over-routed**; 3 under-routed, all one borderline case (a SQL "top 3 orders per customer" query sent to Haiku) |
+| Follow-ups ("yes, do it" after an Opus plan) | Stays on Opus 6/6, after the follow-up rule was tightened. Before that, it dropped to Sonnet 1/3 of the time. |
+| Cost per classification | ~$0.00017 |
+| End-to-end (6 prompts, sessions started on Opus) | **6/6** answered by the expected model: Haiku for both easy prompts, Sonnet for both coding prompts, Opus for both hard ones. Cost $0.01–0.05 per prompt, including the answer. |
+
+To tune the router, change `SYSTEM` in `register.ts`, rerun `routing_eval.py`, and compare. Add your own prompts to `cases.jsonl` so the eval matches how you actually work.
 
 ## License
 

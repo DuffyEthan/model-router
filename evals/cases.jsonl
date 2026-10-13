@@ -1,0 +1,33 @@
+{"id":"h1","prompt":"what does ls -la do","expect":["haiku"]}
+{"id":"h2","prompt":"rename the variable x to count in this line: x = 0","expect":["haiku"]}
+{"id":"h3","prompt":"What's the git command to undo my last commit but keep the changes?","expect":["haiku"]}
+{"id":"h4","prompt":"Convert this to JSON: name=Ann, age=31, city=Cork","expect":["haiku"]}
+{"id":"h5","prompt":"What port does Postgres use by default?","expect":["haiku"]}
+{"id":"h6","prompt":"Fix the typo in this README heading: '## Instalation'","expect":["haiku"]}
+{"id":"h7","prompt":"what's the difference between let and const in javascript","expect":["haiku"]}
+{"id":"h8","prompt":"Give me a one-liner to count lines in all .py files in this folder","expect":["haiku"]}
+{"id":"h9","prompt":"I have a very long log file below and I just need you to tell me what timestamp the first ERROR line has.\n2026-10-01 10:00:01 INFO start\n2026-10-01 10:00:02 INFO loading config\n2026-10-01 10:00:03 INFO connecting\n2026-10-01 10:00:04 WARN slow response\n2026-10-01 10:00:05 ERROR connection refused\n2026-10-01 10:00:06 INFO retrying","expect":["haiku"]}
+{"id":"h10","prompt":"Summarise this paragraph in one sentence: The meeting covered Q3 results, which were slightly above forecast, and agreed to revisit hiring plans in November.","expect":["haiku"]}
+{"id":"s1","prompt":"Write a Python function that parses ISO 8601 dates and add pytest tests for it","expect":["sonnet","haiku"]}
+{"id":"s2","prompt":"Why is this test failing?\n\nFAILED tests/test_cart.py::test_total - AssertionError: assert 19.99 == 20.0\n\ndef total(items): return sum(i.price for i in items)","expect":["sonnet","haiku"]}
+{"id":"s3","prompt":"Refactor this 200-line Express route handler into smaller functions with clear names. Keep behaviour identical.","expect":["sonnet"]}
+{"id":"s4","prompt":"Add pagination to the /users endpoint in our FastAPI app, with limit and offset query params and tests.","expect":["sonnet"]}
+{"id":"s5","prompt":"Explain how this React useEffect cleanup works and why the interval keeps firing after unmount.","expect":["sonnet","haiku"]}
+{"id":"s6","prompt":"Write a GitHub Actions workflow that runs pytest on Python 3.10-3.12 and caches pip.","expect":["sonnet","haiku"]}
+{"id":"s7","prompt":"Convert this callback-based Node module to async/await and update its callers in the same file.","expect":["sonnet"]}
+{"id":"s8","prompt":"Write a SQL query that returns each customer's three most recent orders, then explain how it works.","expect":["sonnet"]}
+{"id":"s9","prompt":"Add input validation and helpful error messages to this CLI's argument parsing.","expect":["sonnet","haiku"]}
+{"id":"s10","prompt":"Write docs for this module's public API: a README section with examples for each function.","expect":["sonnet","haiku"]}
+{"id":"o1","prompt":"Design a zero-downtime migration plan for sharding our 5TB production Postgres monolith into a multi-tenant architecture.","expect":["opus"]}
+{"id":"o2","prompt":"There's an intermittent race condition in our job queue that only shows up under load, causing jobs to run twice. Find the cause across the worker, scheduler and lock modules and fix it.","expect":["opus"]}
+{"id":"o3","prompt":"Do a security review of our OAuth login flow and session handling before we ship it to production.","expect":["opus"]}
+{"id":"o4","prompt":"Plan and implement extracting the billing module from our monolith into its own service, updating every caller and keeping the old API working during the transition.","expect":["opus"]}
+{"id":"o5","prompt":"Why does prod keep crashing after the last deploy? Nothing obvious in the diff.","expect":["opus","sonnet"]}
+{"id":"o6","prompt":"Should we move from REST to GraphQL for our mobile clients? Weigh the trade-offs for our team of 4 and our existing caching layer, and recommend a path.","expect":["opus","sonnet"]}
+{"id":"o7","prompt":"Write a migration script that deletes duplicate customer records in the production database, keeping the most recent one.","expect":["opus"]}
+{"id":"o8","prompt":"Our memory usage grows slowly over days until the service OOMs. Profile-guided: here are heap snapshots from day 1 and day 3. Find the leak.","expect":["opus","sonnet"]}
+{"id":"o9","prompt":"Prove that this lock-free queue implementation is linearizable, or find a counterexample interleaving.","expect":["opus"]}
+{"id":"o10","prompt":"Rework our permission system from role-based to attribute-based access control across the API, admin UI and background jobs.","expect":["opus"]}
+{"id":"c1","context":[["user","Design a zero-downtime migration plan for sharding our 5TB production Postgres monolith."],["assistant","Here is a 6-phase plan: 1) choose tenant_id as shard key ... 6) cut over with dual writes and backfill verification."]],"prompt":"yes, do it","expect":["opus"]}
+{"id":"c2","context":[["user","what does ls -la do"],["assistant","It lists all files, including hidden ones, in long format with permissions, owner, size and date."]],"prompt":"thanks! and what about ls -lh?","expect":["haiku"]}
+{"id":"c3","context":[["user","Add pagination to the /users endpoint with limit and offset."],["assistant","Done. I added limit/offset params, updated the query and added three tests."]],"prompt":"great, now do the same for /orders","expect":["sonnet","haiku"]}

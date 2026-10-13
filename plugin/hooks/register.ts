@@ -31,7 +31,7 @@ Effort: low (fast, little reasoning), medium (typical), high (careful reasoning)
 Rules:
 - Prefer the cheaper model when in doubt between two adjacent tiers, unless the task is high-stakes (production data, security, irreversible actions).
 - Judge the task's difficulty, not its length.
-- You may see the end of the conversation for context. Route the NEW message. A short follow-up ("yes", "do it", "continue", "try again") inherits the difficulty of the task it refers to.
+- You may see the end of the conversation for context. Route the NEW message. A short follow-up that approves or continues earlier work ("yes", "do it", "go ahead", "continue", "try again") gets the same model as that work, never a cheaper one.
 
 Reply with only a JSON object, no prose: {"model": "haiku"|"sonnet"|"opus", "effort": "low"|"medium"|"high"|"xhigh", "reason": "<one short sentence>"}`
 
