@@ -32,15 +32,52 @@ Requirements: Claude Code 2.1.275 or later for the plugin, and Python 3.8+ for t
 
 ## The plugin
 
-Once it's installed, routing just happens. Each time you send a prompt:
+Once it's installed, routing just happens.
 
-1. **`prompt.submit`**: Haiku (low effort) classifies the new message. It also gets the last few messages of the conversation, so a follow-up like "yes, do it" inherits the difficulty of the task it refers to.
-2. **`turn.step`**: every model request in that turn is rewritten to the routed model and effort. Subagents keep their own models.
-3. The status line shows the decision, for example `router → sonnet · medium`.
+### How it works, step by step
 
-If classification fails or times out, the turn runs on whatever model the session was already using.
+When you send a prompt, Haiku makes a quick decision first, then that turn's requests are rewritten to use the model and effort it picked. The plugin is one file, [`plugin/hooks/register.ts`](plugin/hooks/register.ts), which hooks into four points in Claude Code:
 
-Commands:
+```
+You type a prompt
+   │
+   ▼
+① prompt.submit hook ── Haiku (low effort) ──► {"model":"sonnet","effort":"medium","reason":"..."}
+   │                      reads: your new message + last ~4 messages (trimmed)
+   │                      status line: "router → sonnet · medium"
+   ▼
+Claude Code builds the request as normal (full conversation, CLAUDE.md, tools…)
+   │
+   ▼
+② turn.step hook ── rewrites ONLY model + effort ──► claude-sonnet-5-5 @ medium
+   │                 (fires on every request in the turn: each step of the tool-call loop)
+   ▼
+Sonnet answers, edits files, runs tools… until the turn ends
+   │
+   ▼
+Next prompt → back to ①, fresh decision
+```
+
+**① Classifying (`prompt.submit`).** This runs before your message enters the conversation.
+- The plugin sends Haiku a short router prompt describing the three tiers: Haiku for trivial things, Sonnet for everyday coding, Opus for hard or high-stakes work.
+- Haiku also gets the last few messages, so a follow-up like "yes, do it" is judged by the task it refers to.
+- It's a separate one-off call (`$.model.complete`) with a 20-second timeout and a 300-token answer cap. It has no tools and no history, and nothing from it goes into your conversation.
+- Haiku replies with JSON, which the plugin checks before using. Anything invalid means "no route", and the turn uses your session's normal model.
+- The decision appears in the status line, for example `router → sonnet · medium`.
+
+**② Rewriting (`turn.step`).** This runs just before each request Claude Code sends to the API.
+- The plugin swaps in the chosen model's full name (e.g. `claude-sonnet-5-5`) and the chosen effort level.
+- Everything else is locked by Claude Code: the conversation, the instructions, the tools. That's why context is never affected.
+- One turn can make many requests, because the model calls a tool, reads the result and continues. All of them use the routed model.
+- Requests from subagents are left alone.
+
+**③ Startup (`session.start`).** This loads your on/off setting, which is saved across sessions, and registers the `/router` command.
+
+**④ `/router` (`command.run`).** `on` and `off` turn routing on and off. `status` shows the last decision with Haiku's reason and how many prompts went to each model this session.
+
+**Where the savings come from:** the model doing the work in that turn is what you pay for. Each Haiku check costs about $0.0003. If it sends a quick question to Haiku instead of Opus, that answer costs a small fraction of what it would have, and effort set to `low` cuts thinking tokens further. See [Benefits and drawbacks](#benefits-and-drawbacks) for when a switch gets expensive.
+
+### Commands
 
 | Command | What it does |
 |---|---|
@@ -65,6 +102,8 @@ route --dry-run "prompt"       # only show the decision
 route --model opus "prompt"    # skip routing
 echo "prompt" | route -p       # prompt from stdin
 ```
+
+How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
 
 Other flags (`--permission-mode`, `--add-dir`, …) pass straight through to `claude`. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0003.
 
