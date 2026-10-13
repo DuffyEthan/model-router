@@ -1,0 +1,14 @@
+{
+  "name": "model-router",
+  "description": "Route Claude Code prompts to the cheapest capable model.",
+  "owner": {
+    "name": "Ethan Duffy"
+  },
+  "plugins": [
+    {
+      "name": "model-router",
+      "source": "./plugin",
+      "description": "Haiku reads each prompt and routes it to the cheapest capable model and effort."
+    }
+  ]
+}

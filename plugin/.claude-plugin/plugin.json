@@ -1,0 +1,10 @@
+{
+  "name": "model-router",
+  "version": "0.1.0",
+  "description": "Haiku reads each prompt and routes it to the cheapest capable model and effort.",
+  "author": {
+    "name": "Ethan Duffy"
+  },
+  "repository": "https://github.com/DuffyEthan/model-router",
+  "license": "MIT"
+}
