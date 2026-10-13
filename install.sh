@@ -22,8 +22,7 @@ command -v claude >/dev/null 2>&1 || { echo "error: the 'claude' CLI is not on y
 
 if [ "$do_plugin" = 1 ]; then
   echo "==> Installing the Claude Code plugin (per-prompt routing inside Claude Code)"
-  claude plugin marketplace add "$REPO"
-  claude plugin install model-router@model-router
+  claude plugin install model-router --marketplace "$REPO"
 fi
 
 if [ "$do_cli" = 1 ]; then

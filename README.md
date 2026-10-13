@@ -20,13 +20,21 @@ curl -fsSL https://raw.githubusercontent.com/DuffyEthan/model-router/main/instal
 
 Use `--plugin-only` or `--cli-only` to install just one: `... | sh -s -- --plugin-only`.
 
-**Or install just the plugin from inside Claude Code** (in a terminal session):
+**Or install just the plugin** from a terminal:
+
+```bash
+claude plugin install model-router --marketplace DuffyEthan/model-router
+```
+
+or from inside an interactive Claude Code terminal session:
 
 ```
 /plugin install model-router --marketplace DuffyEthan/model-router
 ```
 
 Answer `y` to add the marketplace, then pick a scope. *User* scope enables the plugin in every session.
+
+**Claude desktop app:** the Code tab can't run `/plugin`, but it loads plugins installed at User scope. Install with either command above from a terminal, then start a new Code session and type `/router` to check it's on.
 
 Requirements: Claude Code 2.1.275 or later for the plugin, and Python 3.8+ for the CLI. The plugin uses your normal Claude Code login, so it works on a Pro/Max subscription (saving usage limits) or with an API key (saving money).
 
