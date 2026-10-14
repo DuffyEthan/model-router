@@ -187,6 +187,68 @@ class MainTests(unittest.TestCase):
             route.main()
 
 
+class ValidationTests(unittest.TestCase):
+    def run_invalid(self, argv, decision=None):
+        """Run main() expecting a validation error; return (exit code, stderr, mocks)."""
+        decision = decision or {"model": "sonnet", "effort": "medium", "reason": "coding"}
+        with mock.patch.object(sys, "argv", ["route", *argv]), \
+             mock.patch.object(route, "classify", return_value=dict(decision)) as classify, \
+             mock.patch.object(route, "log"), \
+             mock.patch.object(route.os, "execvp") as execvp, \
+             mock.patch.object(sys, "stdin", io.StringIO()), \
+             mock.patch("sys.stderr", new_callable=io.StringIO), \
+             self.assertRaises(SystemExit) as cm:
+            route.main()
+        execvp.assert_not_called()
+        self.assertNotIn(cm.exception.code, (0, None))
+        return str(cm.exception.code), classify
+
+    def test_invalid_model_flag(self):
+        msg, classify = self.run_invalid(["--model", "gpt-4", "do a thing"])
+        self.assertIn("invalid model 'gpt-4'", msg)
+        self.assertIn("haiku, sonnet, opus", msg)
+        classify.assert_not_called()
+
+    def test_empty_model_flag_is_rejected_not_ignored(self):
+        msg, classify = self.run_invalid(["--model", "", "do a thing"])
+        self.assertIn("invalid model ''", msg)
+        classify.assert_not_called()
+
+    def test_invalid_effort_flag(self):
+        msg, classify = self.run_invalid(["--effort", "max", "do a thing"])
+        self.assertIn("invalid effort 'max'", msg)
+        self.assertIn("low, medium, high, xhigh", msg)
+        classify.assert_not_called()  # no classifier call wasted on a bad flag
+
+    def test_invalid_effort_with_forced_model(self):
+        msg, _ = self.run_invalid(["--model", "opus", "--effort", "HIGH", "do a thing"])
+        self.assertIn("invalid effort 'HIGH'", msg)
+
+    def test_invalid_flags_rejected_on_dry_run_too(self):
+        msg, _ = self.run_invalid(["--dry-run", "--model", "o", "do a thing"])
+        self.assertIn("invalid model 'o'", msg)
+
+    def test_build_command_refuses_unknown_model(self):
+        # Belt and braces: even a decision that skipped classify()'s checks can't reach exec.
+        msg, _ = self.run_invalid(["do a thing"], decision={"model": "gpt", "effort": "low", "reason": "x"})
+        self.assertIn("invalid model 'gpt'", msg)
+
+    def test_build_command_refuses_unknown_effort(self):
+        msg, _ = self.run_invalid(["do a thing"], decision={"model": "opus", "effort": "max", "reason": "x"})
+        self.assertIn("invalid effort 'max'", msg)
+
+    def test_all_allowed_values_pass(self):
+        for model in route.MODELS:
+            for effort in route.EFFORTS:
+                cmd = route.build_command({"model": model, "effort": effort}, [], False, "p")
+                self.assertEqual(cmd, ["claude", "--model", model, "--effort", effort, "p"])
+
+    def test_schema_matches_allowed_values(self):
+        props = route.SCHEMA["properties"]
+        self.assertEqual(tuple(props["model"]["enum"]), route.MODELS)
+        self.assertEqual(tuple(props["effort"]["enum"]), route.EFFORTS)
+
+
 class LogTests(unittest.TestCase):
     def test_log_appends_jsonl_and_truncates_prompt(self):
         import tempfile

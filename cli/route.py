@@ -105,8 +105,8 @@ def main() -> None:
     ap.add_argument("prompt", nargs="*", help="prompt text (or pipe via stdin)")
     ap.add_argument("-p", "--print", action="store_true", help="run headless and print the answer")
     ap.add_argument("--dry-run", action="store_true", help="only show the routing decision")
-    ap.add_argument("--model", help="skip routing and force a model")
-    ap.add_argument("--effort", help="override the routed effort level")
+    ap.add_argument("--model", help=f"skip routing and force a model ({', '.join(MODELS)})")
+    ap.add_argument("--effort", help=f"override the routed effort level ({', '.join(EFFORTS)})")
     argv = sys.argv[1:]
     # Everything after "--" goes to claude untouched (needed for flags that take
     # a value, e.g. `-- --permission-mode plan`, which we can't tell from a prompt).
@@ -116,6 +116,7 @@ def main() -> None:
         argv, passthrough = argv[:i], argv[i + 1:]
     args, extra = ap.parse_known_args(argv)  # other unknown flags (e.g. --flag=value) too
     passthrough = extra + passthrough
+    validate(args.model, args.effort)  # reject bad overrides before reading stdin or classifying
 
     prompt = " ".join(args.prompt).strip()
     if not prompt and not sys.stdin.isatty():
@@ -123,7 +124,7 @@ def main() -> None:
     if not prompt:
         ap.error("no prompt given")
 
-    if args.model:
+    if args.model is not None:
         decision = {"model": args.model, "effort": args.effort or "medium", "reason": "forced"}
     else:
         decision = classify(prompt)
@@ -142,7 +143,16 @@ def main() -> None:
     os.execvp("claude", build_command(decision, passthrough, args.print, prompt))  # hand the terminal over
 
 
+def validate(model, effort) -> None:
+    """Exit non-zero unless model/effort are allowed values. None means "flag omitted"."""
+    for kind, value, allowed in (("model", model, MODELS), ("effort", effort, EFFORTS)):
+        if value is not None and value not in allowed:
+            sys.exit(f"route: invalid {kind} {value!r}; allowed: {', '.join(allowed)}")
+
+
 def build_command(decision: dict, passthrough: list[str], headless: bool, prompt: str) -> list[str]:
+    # Last check before exec: never hand claude a model or effort we don't know.
+    validate(decision["model"], decision["effort"])
     cmd = ["claude"]
     # A None model/effort means "don't pass the flag", so claude keeps its session default.
     if decision["model"] is not None:

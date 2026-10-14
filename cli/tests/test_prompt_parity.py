@@ -129,5 +129,14 @@ class PromptParityTests(unittest.TestCase):
                       "Update cli/route.py SYSTEM_PROMPT to match:\n" + diff)
 
 
+    def test_allowed_models_and_efforts_match_plugin(self):
+        src = REGISTER_TS.read_text(encoding="utf-8")
+        for name, cli_values in (("TIERS", route.MODELS), ("EFFORTS", route.EFFORTS)):
+            m = re.search(r"\bconst\s+" + name + r"\b[^=]*=\s*\[([^\]]*)\]", src)
+            self.assertIsNotNone(m, f"no `const {name} = [...]` in register.ts")
+            plugin_values = tuple(re.findall(r"['\"]([^'\"]+)['\"]", m.group(1)))
+            self.assertEqual(cli_values, plugin_values, f"CLI allowed values differ from register.ts {name}")
+
+
 if __name__ == "__main__":
     unittest.main()
