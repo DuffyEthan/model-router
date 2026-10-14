@@ -41,7 +41,7 @@ Each file contains:
 - `router_prompt_sha256`: hash of the exact `SYSTEM` text read from `plugin/hooks/register.ts`. Two result files are only directly comparable if this matches (and the models match).
 - `runs_per_case`, `filters`, `cost_usd`
 - `summary`: `original`, `heldout` and `overall`, each with counts of ok / under / over / failed, `accuracy` and `stability`
-- `cases`: for every case its id, set, exact classifier input, expected tiers, and every run's raw reply, parsed `{model, effort, reason}`, resolved model IDs, token usage, cost and grade, plus whether all runs passed
+- `cases`: one line per case, so a run is about 65 lines. Each has its id, set, exact classifier input, expected tiers, and every run's raw reply, parsed `{model, effort, reason}`, resolved model IDs, token counts (input, output, cache write and read), cost and grade, plus whether all runs passed
 
 `e2e.py` only prints to the console; it does not write a results file.
 

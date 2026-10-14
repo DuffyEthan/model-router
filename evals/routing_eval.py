@@ -85,7 +85,7 @@ def classify(system: str, case: dict) -> dict:
         raw = body.get("result", "")
         return {"raw": raw, "parsed": parse_reply(raw), "error": None,
                 "model_ids": sorted(body.get("modelUsage", {}) or {}),
-                "usage": body.get("usage"), "cost": body.get("total_cost_usd") or 0.0}
+                "usage": slim_usage(body.get("usage")), "cost": body.get("total_cost_usd") or 0.0}
     except Exception as e:
         return {"raw": raw, "parsed": {"model": None, "effort": None, "reason": ""},
                 "error": str(e), "model_ids": [], "usage": None, "cost": 0.0}
@@ -113,6 +113,23 @@ def summarize(case_rows: list[dict]) -> dict:
             "accuracy": totals["ok"] / n if n else None,
             "stable_cases": stable,
             "stability": stable / len(case_rows) if case_rows else None}
+
+
+USAGE_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def slim_usage(usage):
+    """Keep only the token counts; the CLI's full usage block is mostly noise."""
+    if not isinstance(usage, dict):
+        return None
+    return {k: usage[k] for k in USAGE_KEYS if k in usage}
+
+
+def dumps_results(data: dict) -> str:
+    """JSON with the header indented and one line per case, so a run is ~65 lines, not ~10,000."""
+    head = json.dumps({k: v for k, v in data.items() if k != "cases"}, indent=2)
+    lines = ",\n".join("    " + json.dumps(c, separators=(", ", ": ")) for c in data["cases"])
+    return head[:-2] + ',\n  "cases": [\n' + lines + "\n  ]\n}\n"
 
 
 def results_path(day: str, directory: Path = RESULTS_DIR) -> Path:
@@ -186,7 +203,7 @@ def main(argv: list[str] | None = None, classify_fn=classify) -> Path:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     path = results_path(started.strftime("%Y-%m-%d"), args.out_dir)
-    path.write_text(json.dumps({
+    path.write_text(dumps_results({
         "timestamp": started.isoformat(),
         "finished": datetime.now(timezone.utc).isoformat(),
         "models": {
@@ -202,7 +219,7 @@ def main(argv: list[str] | None = None, classify_fn=classify) -> Path:
         "cost_usd": cost,
         "summary": summary,
         "cases": rows,
-    }, indent=2) + "\n")
+    }))
     print(f"details: {path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}")
     return path
 
