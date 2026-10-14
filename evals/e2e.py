@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = Path(__file__).with_name("cases.jsonl")
+CASE_FILES = [Path(__file__).with_name("cases.jsonl"), Path(__file__).with_name("cases_heldout.jsonl")]
 DEFAULT = ["h1", "h5", "s1", "s4", "o1", "o3"]
 FAMILY = {"haiku": "claude-haiku", "sonnet": "claude-sonnet", "opus": "claude-opus"}
 
@@ -37,7 +37,8 @@ def main() -> None:
     ap.add_argument("--only")
     args = ap.parse_args()
     ids = args.only.split(",") if args.only else DEFAULT
-    cases = [c for c in map(json.loads, CASES.read_text().splitlines()) if c["id"] in ids and "context" not in c]
+    lines = [l for f in CASE_FILES for l in f.read_text().splitlines() if l.strip()]
+    cases = [c for c in map(json.loads, lines) if c["id"] in ids and "context" not in c]
     passed = 0
     with ThreadPoolExecutor(4) as pool:
         for case, models, cost in pool.map(run, cases):
