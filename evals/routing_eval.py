@@ -3,8 +3,8 @@
 
 Uses the plugin's actual router prompt (read from plugin/hooks/register.ts) and
 builds the classifier input the same way the plugin does, then calls Haiku at
-low effort through the `claude` CLI. See evals/README.md for what the numbers
-mean and what a run costs.
+low effort through the `claude` CLI. Costs roughly $0.0002 per classification;
+see evals/README.md for what the numbers mean and what a full run costs.
 
     python3 evals/routing_eval.py              # all cases, 3 runs each
     python3 evals/routing_eval.py --runs 1 --only h1,ho1
