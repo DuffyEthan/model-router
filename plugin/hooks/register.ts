@@ -1,4 +1,4 @@
-import type { EngineInterface, ModelEffort, Register } from 'claude-code'
+import type { EngineInterface, ModelEffort, PromptOrigin, Register } from 'claude-code'
 
 type Tier = 'haiku' | 'sonnet' | 'opus'
 type Route = { model: Tier; effort: ModelEffort; reason: string }
@@ -50,10 +50,12 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Classify each prompt before it enters the session.
+  // Classify each prompt the person typed before it enters the session. Every
+  // submission clears the previous route first, so a turn that isn't classified (a slash
+  // command, a background task's notification, a peer's message) runs on the session model.
   on('prompt.submit', async ($, e, next) => {
-    if (enabled && e.text.trim() && !e.text.trimStart().startsWith('/')) {
-      route = undefined // never reuse a stale route if classification throws
+    route = undefined
+    if (enabled && isUserPrompt(e.origin) && e.text.trim() && !e.text.trimStart().startsWith('/')) {
       route = await classify($, e.text)
       if (route) {
         counts[route.model] += 1
@@ -62,6 +64,13 @@ export const register: Register = on => {
         $.ui.status('router → session model (classifier failed)')
       }
     }
+    return next(e)
+  })
+
+  // A slash command (e.g. /security-review) may start a turn of its own: run it on the
+  // session model rather than whatever the last prompt was routed to.
+  on('command.run', async ($, e, next) => {
+    if (e.command !== 'router') route = undefined
     return next(e)
   })
 
@@ -95,6 +104,21 @@ export const register: Register = on => {
       ].join('\n'),
     }
   })
+}
+
+// Prompts that are the person's own words. Absent origin means the user's own.
+function isUserPrompt(origin: PromptOrigin | undefined): boolean {
+  if (!origin) return true
+  switch (origin.kind) {
+    case 'composer':
+    case 'bridge':
+    case 'sdk':
+      return true
+    case 'plugin':
+      return origin.asUser === true
+    default:
+      return false
+  }
 }
 
 async function classify($: EngineInterface, text: string): Promise<Route | undefined> {
