@@ -16,13 +16,29 @@ import {
 } from './tracker'
 
 type Tier = 'haiku' | 'sonnet' | 'opus'
-type Route = { model: Tier; effort: ModelEffort; reason: string }
+// `raisedFrom`: the tier the classifier picked when the floor raised it.
+type Route = { model: Tier; effort: ModelEffort; reason: string; raisedFrom?: Tier }
 type Classified = { route?: Route; outcome: Exclude<Outcome, 'skipped'>; usage?: ClassifierUsage }
 
 const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus']
 const CLASSIFIER_TIMEOUT_MS = 20000
-const USAGE = 'Usage: /router [on|off|status|stats|export [path]]'
+const USAGE = 'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]'
 const EFFORTS: readonly ModelEffort[] = ['low', 'medium', 'high', 'xhigh']
+const DEFAULT_FLOOR: Tier = 'haiku' // no floor: every tier can be routed to
+
+// The persisted floor, or the default when it is unset, unknown or corrupt.
+function asFloor(v: unknown): Tier {
+  return TIERS.includes(v as Tier) ? (v as Tier) : DEFAULT_FLOOR
+}
+
+// Never route below `floor`. A raised route keeps the classifier's effort when the floor
+// tier accepts it; Haiku, Sonnet and Opus 5.5 all accept every level the classifier may
+// return (low to xhigh), so the medium fallback only guards a future narrower tier.
+function applyFloor(r: Route, floor: Tier): Route {
+  if (TIERS.indexOf(r.model) >= TIERS.indexOf(floor)) return r
+  const effort = EFFORTS.includes(r.effort) ? r.effort : 'medium'
+  return { ...r, model: floor, effort, raisedFrom: r.model }
+}
 
 // turn.step takes full model ids, not aliases. Update these when new models ship.
 const MODEL_IDS: Record<Tier, string> = {
@@ -71,16 +87,18 @@ Rules:
 Reply with only a JSON object, no prose: {"model": "haiku"|"sonnet"|"opus", "effort": "low"|"medium"|"high"|"xhigh", "reason": "<one short sentence>"}`
 
 export const register: Register = on => {
-  // Module state resets on a hot reload; `enabled` is persisted in $.store.
+  // Module state resets on a hot reload; `enabled` and `floor` are persisted in $.store.
   let enabled = true
+  let floor: Tier = DEFAULT_FLOOR
   let route: Route | undefined
   const counts: Record<Tier, number> = { haiku: 0, sonnet: 0, opus: 0 }
 
   on('session.start', async ($, e, next) => {
     enabled = (await $.store.get('enabled')) !== false
+    floor = asFloor(await $.store.get('floor'))
     await $.command.register({
       name: 'router',
-      description: 'Model router: /router [on|off|status|stats|export [path]]',
+      description: 'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]',
     })
     return next(e)
   })
@@ -110,7 +128,7 @@ export const register: Register = on => {
         c = { outcome: 'failed' } // a classifier error must never block the prompt
       }
       latencyMs = await elapsedSince($, t0)
-      route = c.route
+      route = c.route && applyFloor(c.route, floor)
       outcome = c.outcome
       usage = c.usage
       if (route) {
@@ -135,6 +153,7 @@ export const register: Register = on => {
       origin: classifyOrigin(text, isUser),
       originKind: e.origin?.kind ?? 'none',
       midTurn: e.turnId !== undefined,
+      ...(route?.raisedFrom ? { floored: true } : {}),
       ...(usage ? { usage } : {}),
     }
     const result = await next(e)
@@ -191,7 +210,16 @@ export const register: Register = on => {
   on('command.run', { command: 'router' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'stats') {
-      return { text: formatStats(await readLog($), await readClassifierPrice($)) }
+      return { text: `${formatStats(await readLog($), await readClassifierPrice($))}\nFloor: ${floor}` }
+    }
+    if (arg === 'floor' || arg.startsWith('floor ')) {
+      const want = arg.slice('floor'.length).trim()
+      if (want) {
+        if (!TIERS.includes(want as Tier)) return { text: USAGE }
+        floor = want as Tier
+        await $.store.set('floor', floor)
+      }
+      return { text: `Floor: ${floor} (the router never picks a model below ${floor})` }
     }
     if (arg === 'export' || arg.startsWith('export ')) {
       try {
@@ -221,10 +249,12 @@ export const register: Register = on => {
     } else if (arg && arg !== 'status') {
       return { text: USAGE }
     }
-    const last = route ? `${route.model} · ${route.effort} — ${route.reason}` : 'none yet'
+    const raised = route?.raisedFrom ? ` (raised from ${route.raisedFrom} by the floor)` : ''
+    const last = route ? `${route.model} · ${route.effort} — ${route.reason}${raised}` : 'none yet'
     return {
       text: [
         `Model router: ${enabled ? 'on' : 'off'}`,
+        `Floor: ${floor}`,
         `Last route: ${last}`,
         `This session: haiku ${counts.haiku}, sonnet ${counts.sonnet}, opus ${counts.opus}`,
       ].join('\n'),

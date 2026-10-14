@@ -8,6 +8,7 @@ Usage:
     route "your prompt"            # classify, then open interactive Claude Code
     route -p "your prompt"         # classify, then run headless (print mode)
     route --dry-run "your prompt"  # only show the routing decision
+    route --floor sonnet "prompt"  # never route below sonnet
     route "your prompt" -- --permission-mode plan   # flags after -- go to claude
     echo "prompt" | route -p       # prompt from stdin
 """
@@ -24,6 +25,7 @@ CLASSIFIER_MODEL = "haiku"
 CLASSIFIER_EFFORT = "low"
 MODELS = ("haiku", "sonnet", "opus")
 EFFORTS = ("low", "medium", "high", "xhigh")
+DEFAULT_FLOOR = "haiku"  # no floor: every tier can be routed to
 # Like the plugin: if routing fails, don't pick a model; claude uses the session default.
 SESSION_DEFAULT = {"model": None, "effort": None, "reason": "classifier failed; using the session model"}
 LOG_PATH = Path(os.environ.get("MODEL_ROUTER_LOG", Path.home() / ".model-router" / "log.jsonl"))
@@ -100,6 +102,19 @@ def log(prompt: str, decision: dict) -> None:
         pass
 
 
+def apply_floor(decision: dict, floor: str) -> dict:
+    """Raise a routed model below `floor` to `floor`, like the plugin's /router floor.
+
+    A failed classification (model None) is left alone: claude keeps its session model.
+    The effort is kept when valid (every tier accepts every routed effort), else medium.
+    """
+    model = decision.get("model")
+    if model not in MODELS or MODELS.index(model) >= MODELS.index(floor):
+        return decision
+    effort = decision.get("effort")
+    return {**decision, "model": floor, "effort": effort if effort in EFFORTS else "medium", "floored": True}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Route a prompt to the cheapest capable Claude model.")
     ap.add_argument("prompt", nargs="*", help="prompt text (or pipe via stdin)")
@@ -107,6 +122,8 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="only show the routing decision")
     ap.add_argument("--model", help=f"skip routing and force a model ({', '.join(MODELS)})")
     ap.add_argument("--effort", help=f"override the routed effort level ({', '.join(EFFORTS)})")
+    ap.add_argument("--floor", default=DEFAULT_FLOOR,
+                    help=f"never route below this model ({', '.join(MODELS)}; default {DEFAULT_FLOOR})")
     argv = sys.argv[1:]
     # Everything after "--" goes to claude untouched (needed for flags that take
     # a value, e.g. `-- --permission-mode plan`, which we can't tell from a prompt).
@@ -116,7 +133,7 @@ def main() -> None:
         argv, passthrough = argv[:i], argv[i + 1:]
     args, extra = ap.parse_known_args(argv)  # other unknown flags (e.g. --flag=value) too
     passthrough = extra + passthrough
-    validate(args.model, args.effort)  # reject bad overrides before reading stdin or classifying
+    validate(args.model, args.effort, args.floor)  # reject bad overrides before reading stdin or classifying
 
     prompt = " ".join(args.prompt).strip()
     if not prompt and not sys.stdin.isatty():
@@ -127,7 +144,7 @@ def main() -> None:
     if args.model is not None:
         decision = {"model": args.model, "effort": args.effort or "medium", "reason": "forced"}
     else:
-        decision = classify(prompt)
+        decision = apply_floor(classify(prompt), args.floor)
         if args.effort:
             decision["effort"] = args.effort
     log(prompt, decision)
@@ -143,9 +160,9 @@ def main() -> None:
     os.execvp("claude", build_command(decision, passthrough, args.print, prompt))  # hand the terminal over
 
 
-def validate(model, effort) -> None:
-    """Exit non-zero unless model/effort are allowed values. None means "flag omitted"."""
-    for kind, value, allowed in (("model", model, MODELS), ("effort", effort, EFFORTS)):
+def validate(model, effort, floor=None) -> None:
+    """Exit non-zero unless model/effort/floor are allowed values. None means "flag omitted"."""
+    for kind, value, allowed in (("model", model, MODELS), ("effort", effort, EFFORTS), ("floor", floor, MODELS)):
         if value is not None and value not in allowed:
             sys.exit(f"route: invalid {kind} {value!r}; allowed: {', '.join(allowed)}")
 

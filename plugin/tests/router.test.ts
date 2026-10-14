@@ -311,3 +311,203 @@ describe('/router command', () => {
     expect((await router($)).text).toContain('Model router: off')
   })
 })
+
+describe('/router floor', () => {
+  const SONNET = '{"model":"sonnet","effort":"medium","reason":"coding"}'
+  const OPUS = '{"model":"opus","effort":"xhigh","reason":"hard"}'
+
+  test('default floor is haiku: a Haiku pick is not raised', async ($, on) => {
+    const statuses = world(on, HAIKU)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'what does ls -la do')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+    expect(statuses).toEqual(['router → haiku · low'])
+    expect((await router($, 'floor')).text).toContain('Floor: haiku')
+  })
+
+  // [floor, classifier reply, model sent, effort sent]
+  for (const [floor, reply, model, effort] of [
+    ['haiku', SONNET, 'claude-sonnet-5-5', 'medium'],
+    ['haiku', OPUS, 'claude-opus-5-5', 'xhigh'],
+    ['sonnet', HAIKU, 'claude-sonnet-5-5', 'low'],
+    ['sonnet', SONNET, 'claude-sonnet-5-5', 'medium'],
+    ['sonnet', OPUS, 'claude-opus-5-5', 'xhigh'],
+    ['opus', HAIKU, 'claude-opus-5-5', 'low'],
+    ['opus', SONNET, 'claude-opus-5-5', 'medium'],
+    ['opus', OPUS, 'claude-opus-5-5', 'xhigh'],
+  ] as const) {
+    test(`floor ${floor}: ${JSON.parse(reply).model} is sent as ${model} @ ${effort}`, async ($, on) => {
+      world(on, reply)
+      const sent = captureStep(on)
+      await start($)
+      await router($, `floor ${floor}`)
+      await submit($, 'a prompt')
+      await step($)
+      expect(sent).toEqual([{ model, effort }])
+    })
+  }
+
+  test('a raised route keeps every effort the classifier can return', async ($, on) => {
+    const efforts = ['low', 'medium', 'high', 'xhigh']
+    let i = 0
+    world(on, () => {
+      const text = `{"model":"haiku","effort":"${efforts[i++]}","reason":"x"}`
+      return { isAnswered: true, text, usage: {} } as never
+    })
+    const sent = captureStep(on)
+    await start($)
+    await router($, 'floor opus')
+    for (const _ of efforts) {
+      await submit($, 'a prompt')
+      await step($)
+    }
+    expect(sent).toEqual(efforts.map(effort => ({ model: 'claude-opus-5-5', effort })))
+  })
+
+  test('a raised route with a bad effort runs at medium', async ($, on) => {
+    world(on, '{"model":"haiku","effort":"turbo","reason":"x"}')
+    const sent = captureStep(on)
+    await start($)
+    await router($, 'floor sonnet')
+    await submit($, 'a prompt')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'medium' }])
+  })
+
+  test('the status line and /router status show the raised route', async ($, on) => {
+    const statuses = world(on, HAIKU)
+    await start($)
+    await router($, 'floor sonnet')
+    await submit($, 'what does ls -la do')
+    expect(statuses).toEqual(['router → sonnet · low'])
+    const text = (await router($, 'status')).text
+    expect(text).toContain('Floor: sonnet')
+    expect(text).toContain('Last route: sonnet · low — trivial (raised from haiku by the floor)')
+    expect(text).toContain('haiku 0, sonnet 1, opus 0') // counts the tier actually used
+  })
+
+  test('/router floor with no argument reports the floor', async ($, on) => {
+    world(on, HAIKU, { floor: 'opus' })
+    await start($)
+    expect((await router($, 'floor')).text).toBe('Floor: opus (the router never picks a model below opus)')
+  })
+
+  test('/router floor <tier> sets it, is case-insensitive and reports it', async ($, on) => {
+    world(on, HAIKU)
+    await start($)
+    expect((await router($, 'floor Sonnet')).text).toBe(
+      'Floor: sonnet (the router never picks a model below sonnet)',
+    )
+    expect((await router($)).text).toContain('Floor: sonnet')
+  })
+
+  for (const args of ['floor banana', 'floor gpt-4', 'floor sonnet opus', 'floor 2', 'floors']) {
+    test(`rejects /router ${args} and keeps the floor`, async ($, on) => {
+      world(on, HAIKU, { floor: 'sonnet' })
+      await start($)
+      expect((await router($, args)).text).toBe(
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]',
+      )
+      expect((await router($, 'floor')).text).toContain('Floor: sonnet')
+    })
+  }
+
+  test('status shows the default floor', async ($, on) => {
+    world(on, HAIKU)
+    await start($)
+    expect((await router($)).text).toContain('Floor: haiku')
+  })
+
+  test('a floor saved by an earlier session is honoured', async ($, on) => {
+    world(on, HAIKU, { floor: 'opus' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-opus-5-5', effort: 'low' }])
+  })
+
+  for (const corrupt of ['banana', 'Opus', '', 3, null, true, ['opus'], { tier: 'opus' }]) {
+    test(`a stored floor of ${JSON.stringify(corrupt)} is treated as haiku`, async ($, on) => {
+      world(on, HAIKU, { floor: corrupt })
+      const sent = captureStep(on)
+      await start($)
+      await submit($, 'hi')
+      await step($)
+      expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+      expect((await router($, 'floor')).text).toContain('Floor: haiku')
+    })
+  }
+})
+
+describe('/router floor leaves unrouted turns alone', () => {
+  // With the highest floor stored, none of these paths may change the session model.
+  const FLOOR = { floor: 'opus' }
+  const SESSION = { model: 'claude-haiku-5-5', effort: 'low' } as const
+
+  test('slash commands', async ($, on) => {
+    world(on, HAIKU, FLOOR)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, '/security-review')
+    await step($, SESSION)
+    await $.command.run({ command: 'security-review', args: '' })
+    await step($, SESSION)
+    expect(sent).toEqual([SESSION, SESSION])
+  })
+
+  test('non-user turns', async ($, on) => {
+    world(on, HAIKU, FLOOR)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'Background task finished', { kind: 'task-notification' })
+    await step($, SESSION)
+    expect(sent).toEqual([SESSION])
+  })
+
+  test('subagent requests', async ($, on) => {
+    world(on, HAIKU, FLOOR)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { ...SESSION, agentId: 'sub-1' })
+    expect(sent).toEqual([SESSION])
+  })
+
+  for (const [name, reply] of [
+    ['a failed classifier call', () => ({ isAnswered: false, reason: 'api-error' })],
+    ['a classifier timeout', () => ({ isAnswered: false, reason: 'aborted' })],
+    ['an unusable reply', () => ({ isAnswered: true, text: 'no idea', usage: {} })],
+    ['a classifier that throws', () => { throw new Error('boom') }],
+  ] as const) {
+    test(name, async ($, on) => {
+      const statuses = world(on, reply as () => never, FLOOR)
+      const sent = captureStep(on)
+      await start($)
+      await submit($, 'hello there')
+      await step($, SESSION)
+      expect(sent).toEqual([SESSION])
+      expect(statuses).toEqual(['router → session model (classifier failed)'])
+    })
+  }
+
+  test('unrecognised model ids', async ($, on) => {
+    world(on, HAIKU, FLOOR)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'us.anthropic.claude-haiku-5-5-v1:0', effort: 'low' })
+    expect(sent).toEqual([{ model: 'us.anthropic.claude-haiku-5-5-v1:0', effort: 'low' }])
+  })
+
+  test('the router switched off', async ($, on) => {
+    world(on, HAIKU, { ...FLOOR, enabled: false })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, SESSION)
+    expect(sent).toEqual([SESSION])
+  })
+})

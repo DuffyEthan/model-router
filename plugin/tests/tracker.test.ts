@@ -296,7 +296,51 @@ describe('/router stats and export', () => {
   test('the usage line lists the new subcommands', async ($, on) => {
     world(on, HAIKU)
     await start($)
-    expect((await router($, 'banana')).text).toBe('Usage: /router [on|off|status|stats|export [path]]')
+    expect((await router($, 'banana')).text).toBe(
+      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]',
+    )
+  })
+})
+
+describe('routing log: floor', () => {
+  test('a prompt the floor raised logs the tier used and floored: true', async ($, on) => {
+    const { store } = world(on, HAIKU, { floor: 'sonnet' })
+    await start($)
+    await submit($, 'what does ls -la do')
+    expect(prompts(store)[0]).toMatchObject({ tier: 'sonnet', effort: 'low', outcome: 'ok', floored: true })
+  })
+
+  test('a prompt at or above the floor carries no floored field', async ($, on) => {
+    const { store } = world(on, '{"model":"opus","effort":"high","reason":"x"}', { floor: 'sonnet' })
+    await start($)
+    await submit($, 'design the migration')
+    await submit($, '/clear')
+    for (const r of prompts(store)) expect('floored' in r).toBe(false)
+  })
+
+  test('/router floor saves the setting in the store; a bad one writes nothing', async ($, on) => {
+    const { store } = world(on, HAIKU)
+    await start($)
+    await router($, 'floor sonnet')
+    expect(store.data.floor).toBe('sonnet')
+    await router($, 'floor banana')
+    expect(store.data.floor).toBe('sonnet')
+    await router($, 'floor haiku')
+    expect(store.data.floor).toBe('haiku')
+  })
+
+  test('stats shows the current floor', async ($, on) => {
+    world(on, HAIKU, { floor: 'opus' })
+    await start($)
+    expect((await router($, 'stats')).text).toContain('\nFloor: opus')
+  })
+
+  test('stats on an empty log still shows the floor', async ($, on) => {
+    world(on, HAIKU)
+    await start($)
+    const text = (await router($, 'stats')).text
+    expect(text).toContain('No records yet.')
+    expect(text).toContain('Floor: haiku')
   })
 })
 

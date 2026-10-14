@@ -33,6 +33,7 @@ export type PromptRecord = {
   origin: OriginClass
   originKind: string // PromptOrigin.kind as the engine stamped it ('none' when absent)
   midTurn: boolean // prompt.submit carried a turnId: typed over / delivered into a running turn
+  floored?: true // the classifier picked a tier below /router floor; `tier` is the floor
   usage?: ClassifierUsage // the classifier call's own tokens, when it reported them
 }
 

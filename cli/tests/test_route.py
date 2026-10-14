@@ -249,6 +249,94 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(tuple(props["effort"]["enum"]), route.EFFORTS)
 
 
+class FloorTests(unittest.TestCase):
+    def run_main(self, argv, decision):
+        with mock.patch.object(sys, "argv", ["route", *argv]), \
+             mock.patch.object(route, "classify", return_value=dict(decision)) as classify, \
+             mock.patch.object(route, "log") as log, \
+             mock.patch.object(route.os, "execvp") as execvp, \
+             mock.patch.object(sys, "stdin", io.StringIO()), \
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            route.main()
+        self.stderr = err.getvalue()
+        return classify, log, execvp
+
+    def routed(self, argv, model, effort="low"):
+        _, log, execvp = self.run_main(argv, {"model": model, "effort": effort, "reason": "r"})
+        cmd = execvp.call_args.args[1]
+        return (cmd[cmd.index("--model") + 1], cmd[cmd.index("--effort") + 1]), log.call_args.args[1]
+
+    def test_default_floor_is_haiku_and_changes_nothing(self):
+        for model in route.MODELS:
+            (m, e), logged = self.routed(["do a thing"], model)
+            self.assertEqual((m, e), (model, "low"))
+            self.assertNotIn("floored", logged)
+
+    def test_each_floor_raises_lower_tiers_and_leaves_higher_ones(self):
+        for floor in route.MODELS:
+            for model in route.MODELS:
+                with self.subTest(floor=floor, model=model):
+                    (m, e), logged = self.routed(["--floor", floor, "do a thing"], model, "high")
+                    raised = route.MODELS.index(model) < route.MODELS.index(floor)
+                    self.assertEqual(m, floor if raised else model)
+                    self.assertEqual(e, "high")  # effort kept either way
+                    self.assertEqual(logged.get("floored"), True if raised else None)
+
+    def test_raised_route_keeps_every_valid_effort(self):
+        for effort in route.EFFORTS:
+            (m, e), _ = self.routed(["--floor", "opus", "do a thing"], "haiku", effort)
+            self.assertEqual((m, e), ("opus", effort))
+
+    def test_apply_floor_falls_back_to_medium_on_bad_effort(self):
+        d = route.apply_floor({"model": "haiku", "effort": "turbo", "reason": "r"}, "sonnet")
+        self.assertEqual((d["model"], d["effort"], d["floored"]), ("sonnet", "medium", True))
+
+    def test_effort_flag_still_overrides_raised_route(self):
+        (m, e), _ = self.routed(["--floor", "sonnet", "--effort", "xhigh", "do a thing"], "haiku")
+        self.assertEqual((m, e), ("sonnet", "xhigh"))
+
+    def test_dry_run_shows_raised_route(self):
+        _, _, execvp = self.run_main(["--dry-run", "--floor", "sonnet", "do a thing"],
+                                     {"model": "haiku", "effort": "low", "reason": "trivial"})
+        execvp.assert_not_called()
+        self.assertIn("[router] → sonnet / low: trivial", self.stderr)
+
+    def test_floor_never_changes_a_failed_classification(self):
+        for floor in route.MODELS:
+            _, log, execvp = self.run_main(["--floor", floor, "do a thing"], route.SESSION_DEFAULT)
+            self.assertEqual(execvp.call_args.args[1], ["claude", "do a thing"])
+            self.assertIsNone(log.call_args.args[1]["model"])
+
+    def test_floor_does_not_override_forced_model(self):
+        classify, _, execvp = self.run_main(["--floor", "opus", "--model", "haiku", "do a thing"],
+                                            {"model": "sonnet", "effort": "low", "reason": "r"})
+        classify.assert_not_called()
+        self.assertEqual(execvp.call_args.args[1][1:3], ["--model", "haiku"])
+
+    def test_invalid_floor_is_rejected_before_classifying(self):
+        for bad in ("gpt-4", "", "Sonnet", "max"):
+            with self.subTest(bad=bad), \
+                 mock.patch.object(sys, "argv", ["route", "--floor", bad, "do a thing"]), \
+                 mock.patch.object(route, "classify") as classify, \
+                 mock.patch.object(route.os, "execvp") as execvp, \
+                 mock.patch.object(sys, "stdin", io.StringIO()), \
+                 mock.patch("sys.stderr", new_callable=io.StringIO), \
+                 self.assertRaises(SystemExit) as cm:
+                route.main()
+            self.assertIn(f"invalid floor {bad!r}", str(cm.exception.code))
+            self.assertIn("haiku, sonnet, opus", str(cm.exception.code))
+            classify.assert_not_called()
+            execvp.assert_not_called()
+
+    def test_help_mentions_floor(self):
+        with mock.patch.object(sys, "argv", ["route", "--help"]), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+             self.assertRaises(SystemExit):
+            route.main()
+        text = " ".join(out.getvalue().split())  # argparse wraps to the terminal width
+        self.assertIn("--floor FLOOR never route below this model (haiku, sonnet, opus; default haiku)", text)
+
+
 class LogTests(unittest.TestCase):
     def test_log_appends_jsonl_and_truncates_prompt(self):
         import tempfile
