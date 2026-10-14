@@ -1,0 +1,43 @@
+{
+  "enabled": true,
+  "log": [
+    {
+      "v": 1,
+      "kind": "prompt",
+      "ts": "2026-10-01T10:00:00.000Z",
+      "session": "sess-a",
+      "tier": "opus",
+      "effort": "high",
+      "latencyMs": 800,
+      "outcome": "ok",
+      "origin": "user",
+      "originKind": "composer",
+      "midTurn": false,
+      "usage": {
+        "in": 1000,
+        "out": 30,
+        "cr": 0,
+        "cw": 0
+      }
+    },
+    {
+      "v": 1,
+      "kind": "prompt",
+      "ts": "2026-10-01T10:01:00.000Z",
+      "session": "sess-a",
+      "tier": "haiku",
+      "effort": "low",
+      "latencyMs": 700,
+      "outcome": "ok",
+      "origin": "user",
+      "originKind": "composer",
+      "midTurn": false,
+      "usage": {
+        "in": 900,
+        "out": 20,
+        "cr": 0,
+        "cw": 0
+      }
+    }
+  ]
+}
