@@ -60,6 +60,12 @@ class ClassifyTests(unittest.TestCase):
         self.assertIn("--no-session-persistence", cmd)
         self.assertIn("--strict-mcp-config", cmd)
 
+    def test_classifier_gets_plugin_prompt_and_framing(self):
+        _, run = self.run_classify(completed(claude_json({"model": "haiku", "effort": "low", "reason": "x"})))
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--system-prompt") + 1], route.SYSTEM_PROMPT)
+        self.assertEqual(cmd[-1], "<new_message>\nhello\n</new_message>")
+
 
 class MainTests(unittest.TestCase):
     def run_main(self, argv, decision=None, stdin=None):

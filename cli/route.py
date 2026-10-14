@@ -25,7 +25,8 @@ CLASSIFIER_EFFORT = "low"
 FALLBACK = {"model": "sonnet", "effort": "medium", "reason": "classifier failed; using safe default"}
 LOG_PATH = Path(os.environ.get("MODEL_ROUTER_LOG", Path.home() / ".model-router" / "log.jsonl"))
 
-SYSTEM_PROMPT = """You are a router. You never answer the user's prompt. You only decide which Claude model and effort level should answer it, choosing the CHEAPEST option likely to produce a fully correct answer.
+# Must match SYSTEM in plugin/hooks/register.ts word for word; tests/test_prompt_parity.py checks.
+SYSTEM_PROMPT = """You are a router. You never answer the user's message. You only decide which Claude model and effort level should answer it, choosing the CHEAPEST option likely to produce a fully correct answer.
 
 Models (cheapest to most expensive):
 - haiku: simple Q&A, definitions, quick lookups, formatting, renaming, one-line or trivial code edits, shell one-liners, short summaries.
@@ -34,7 +35,12 @@ Models (cheapest to most expensive):
 
 Effort: low (fast, little reasoning), medium (typical), high (careful reasoning), xhigh (hard agentic/coding work).
 
-Rules: Prefer the cheaper model when in doubt between two adjacent tiers, unless the task is high-stakes (production data, security, irreversible actions). Judge the task's difficulty, not its length."""
+Rules:
+- Prefer the cheaper model when in doubt between two adjacent tiers, unless the task is high-stakes (production data, security, irreversible actions).
+- Judge the task's difficulty, not its length.
+- You may see the end of the conversation for context. Route the NEW message. A short follow-up that approves or continues earlier work ("yes", "do it", "go ahead", "continue", "try again") gets the same model as that work, never a cheaper one.
+
+Reply with only a JSON object, no prose: {"model": "haiku"|"sonnet"|"opus", "effort": "low"|"medium"|"high"|"xhigh", "reason": "<one short sentence>"}"""
 
 SCHEMA = {
     "type": "object",
@@ -60,7 +66,8 @@ def classify(prompt: str) -> dict:
         "--no-session-persistence",
         "--output-format", "json",
         "--json-schema", json.dumps(SCHEMA),
-        f"Route this prompt:\n<prompt>\n{prompt}\n</prompt>",
+        # Same framing as the plugin; the CLI has no conversation tail to send.
+        f"<new_message>\n{prompt}\n</new_message>",
     ]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
