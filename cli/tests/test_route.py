@@ -23,8 +23,18 @@ def claude_json(structured=None, result="", cost=0.0003):
 
 class ClassifyTests(unittest.TestCase):
     def run_classify(self, proc):
-        with mock.patch.object(route.subprocess, "run", return_value=proc) as run:
+        with mock.patch.object(route.subprocess, "run", return_value=proc) as run, \
+             mock.patch("sys.stderr", new_callable=io.StringIO):
             return route.classify("hello"), run
+
+    def assert_session_default(self, **run_kwargs):
+        with mock.patch.object(route.subprocess, "run", **run_kwargs), \
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            d = route.classify("hello")
+        self.assertEqual(d, route.SESSION_DEFAULT)
+        self.assertIsNone(d["model"])
+        self.assertIsNone(d["effort"])
+        self.assertIn("using the session model", err.getvalue())
 
     def test_uses_structured_output(self):
         d, _ = self.run_classify(completed(claude_json({"model": "opus", "effort": "xhigh", "reason": "hard"})))
@@ -35,21 +45,37 @@ class ClassifyTests(unittest.TestCase):
         d, _ = self.run_classify(completed(claude_json(result='{"model":"haiku","effort":"low","reason":"x"}')))
         self.assertEqual(d["model"], "haiku")
 
-    def test_invalid_model_falls_back(self):
-        d, _ = self.run_classify(completed(claude_json({"model": "gpt", "effort": "low", "reason": "x"})))
-        self.assertEqual(d["model"], route.FALLBACK["model"])
+    def test_unknown_model_uses_session_default(self):
+        # The plugin leaves the session model alone when the classifier names an unknown model.
+        self.assert_session_default(
+            return_value=completed(claude_json({"model": "gpt", "effort": "low", "reason": "x"})))
 
-    def test_non_json_output_falls_back(self):
-        d, _ = self.run_classify(completed("not json"))
-        self.assertEqual(d, route.FALLBACK)
+    def test_missing_model_uses_session_default(self):
+        self.assert_session_default(return_value=completed(claude_json({"effort": "low", "reason": "x"})))
 
-    def test_timeout_falls_back(self):
-        with mock.patch.object(route.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 60)):
-            self.assertEqual(route.classify("hello"), route.FALLBACK)
+    def test_non_object_reply_uses_session_default(self):
+        self.assert_session_default(return_value=completed(claude_json(result='["opus"]')))
 
-    def test_missing_claude_cli_falls_back(self):
-        with mock.patch.object(route.subprocess, "run", side_effect=FileNotFoundError):
-            self.assertEqual(route.classify("hello"), route.FALLBACK)
+    def test_non_json_output_uses_session_default(self):
+        self.assert_session_default(return_value=completed("not json"))
+
+    def test_unparseable_result_text_uses_session_default(self):
+        self.assert_session_default(return_value=completed(claude_json(result="I think opus")))
+
+    def test_timeout_uses_session_default(self):
+        self.assert_session_default(side_effect=subprocess.TimeoutExpired("claude", 60))
+
+    def test_missing_claude_cli_uses_session_default(self):
+        self.assert_session_default(side_effect=FileNotFoundError)
+
+    def test_unknown_effort_keeps_model_at_medium(self):
+        # Mirrors the plugin: a valid model with a bad effort is kept, effort becomes medium.
+        d, _ = self.run_classify(completed(claude_json({"model": "opus", "effort": "max", "reason": "x"})))
+        self.assertEqual((d["model"], d["effort"]), ("opus", "medium"))
+
+    def test_missing_reason_is_tolerated(self):
+        d, _ = self.run_classify(completed(claude_json({"model": "haiku", "effort": "low"})))
+        self.assertEqual((d["model"], d["reason"]), ("haiku", ""))
 
     def test_classifier_is_cheap_and_isolated(self):
         _, run = self.run_classify(completed(claude_json({"model": "haiku", "effort": "low", "reason": "x"})))
@@ -75,9 +101,39 @@ class MainTests(unittest.TestCase):
              mock.patch.object(route, "log") as log, \
              mock.patch.object(route.os, "execvp") as execvp, \
              mock.patch.object(sys, "stdin", stdin or io.StringIO()), \
-             mock.patch("sys.stderr", new_callable=io.StringIO):
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             route.main()
+        self.stderr = err.getvalue()
         return classify, log, execvp
+
+    def test_classifier_failure_launches_with_session_model(self):
+        _, _, execvp = self.run_main(["do a thing", "--", "--permission-mode", "plan"],
+                                     decision=route.SESSION_DEFAULT)
+        cmd = execvp.call_args.args[1]
+        self.assertEqual(cmd, ["claude", "--permission-mode", "plan", "do a thing"])
+        self.assertNotIn("--model", cmd)
+        self.assertNotIn("--effort", cmd)
+        self.assertIn("session model", self.stderr)
+
+    def test_classifier_failure_keeps_explicit_effort(self):
+        # An effort the user typed is their choice, not the router's, so it survives a failure.
+        _, _, execvp = self.run_main(["--effort", "high", "do a thing"], decision=route.SESSION_DEFAULT)
+        self.assertEqual(execvp.call_args.args[1], ["claude", "--effort", "high", "do a thing"])
+
+    def test_classifier_timeout_end_to_end(self):
+        with mock.patch.object(sys, "argv", ["route", "do a thing"]), \
+             mock.patch.object(route.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 60)), \
+             mock.patch.object(route, "log"), \
+             mock.patch.object(route.os, "execvp") as execvp, \
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            route.main()
+        self.assertEqual(execvp.call_args.args[1], ["claude", "do a thing"])
+        self.assertIn("classifier failed", err.getvalue())
+
+    def test_classifier_failure_dry_run(self):
+        _, _, execvp = self.run_main(["--dry-run", "do a thing"], decision=route.SESSION_DEFAULT)
+        execvp.assert_not_called()
+        self.assertIn("[router] → session model: classifier failed", self.stderr)
 
     def test_dry_run_does_not_launch_claude(self):
         _, log, execvp = self.run_main(["--dry-run", "do a thing"])

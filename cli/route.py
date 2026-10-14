@@ -22,7 +22,10 @@ from pathlib import Path
 
 CLASSIFIER_MODEL = "haiku"
 CLASSIFIER_EFFORT = "low"
-FALLBACK = {"model": "sonnet", "effort": "medium", "reason": "classifier failed; using safe default"}
+MODELS = ("haiku", "sonnet", "opus")
+EFFORTS = ("low", "medium", "high", "xhigh")
+# Like the plugin: if routing fails, don't pick a model; claude uses the session default.
+SESSION_DEFAULT = {"model": None, "effort": None, "reason": "classifier failed; using the session model"}
 LOG_PATH = Path(os.environ.get("MODEL_ROUTER_LOG", Path.home() / ".model-router" / "log.jsonl"))
 
 # Must match SYSTEM in plugin/hooks/register.ts word for word; tests/test_prompt_parity.py checks.
@@ -45,8 +48,8 @@ Reply with only a JSON object, no prose: {"model": "haiku"|"sonnet"|"opus", "eff
 SCHEMA = {
     "type": "object",
     "properties": {
-        "model": {"type": "string", "enum": ["haiku", "sonnet", "opus"]},
-        "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"]},
+        "model": {"type": "string", "enum": list(MODELS)},
+        "effort": {"type": "string", "enum": list(EFFORTS)},
         "reason": {"type": "string", "description": "One short sentence."},
     },
     "required": ["model", "effort", "reason"],
@@ -73,13 +76,19 @@ def classify(prompt: str) -> dict:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
         result = json.loads(out.stdout)
         decision = result.get("structured_output") or json.loads(result["result"])
-        if decision.get("model") not in ("haiku", "sonnet", "opus"):
-            raise ValueError(f"bad model: {decision!r}")
-        decision["router_cost_usd"] = result.get("total_cost_usd")
-        return decision
+        if not isinstance(decision, dict) or decision.get("model") not in MODELS:
+            raise ValueError(f"unknown model in reply: {decision!r}")
+        effort = decision.get("effort")
+        return {
+            "model": decision["model"],
+            # Same as the plugin: a known model with a bad effort runs at medium.
+            "effort": effort if effort in EFFORTS else "medium",
+            "reason": str(decision.get("reason") or ""),
+            "router_cost_usd": result.get("total_cost_usd"),
+        }
     except Exception as e:  # never block the user on a routing failure
-        print(f"[router] classification failed ({e}); falling back", file=sys.stderr)
-        return dict(FALLBACK)
+        print(f"[router] classifier failed ({e}); using the session model", file=sys.stderr)
+        return dict(SESSION_DEFAULT)
 
 
 def log(prompt: str, decision: dict) -> None:
@@ -124,16 +133,27 @@ def main() -> None:
 
     cost = decision.get("router_cost_usd")
     cost_str = f" (router cost ${cost:.5f})" if isinstance(cost, (int, float)) else ""
-    print(f"[router] → {decision['model']} / {decision['effort']}: {decision['reason']}{cost_str}", file=sys.stderr)
+    choice = " / ".join(v for v in (decision["model"] or "session model", decision["effort"]) if v)
+    print(f"[router] → {choice}: {decision['reason']}{cost_str}", file=sys.stderr)
 
     if args.dry_run:
         return
 
-    cmd = ["claude", "--model", decision["model"], "--effort", decision["effort"], *passthrough]
-    if args.print:
+    os.execvp("claude", build_command(decision, passthrough, args.print, prompt))  # hand the terminal over
+
+
+def build_command(decision: dict, passthrough: list[str], headless: bool, prompt: str) -> list[str]:
+    cmd = ["claude"]
+    # A None model/effort means "don't pass the flag", so claude keeps its session default.
+    if decision["model"] is not None:
+        cmd += ["--model", decision["model"]]
+    if decision["effort"] is not None:
+        cmd += ["--effort", decision["effort"]]
+    cmd += passthrough
+    if headless:
         cmd.append("-p")
     cmd.append(prompt)
-    os.execvp("claude", cmd)  # hand the terminal over to Claude Code
+    return cmd
 
 
 if __name__ == "__main__":
