@@ -1,4 +1,4 @@
-import type { EngineInterface, ModelEffort, Register } from 'claude-code'
+import type { EngineInterface, ModelEffort, PromptOrigin, Register } from 'claude-code'
 
 type Tier = 'haiku' | 'sonnet' | 'opus'
 type Route = { model: Tier; effort: ModelEffort; reason: string }
@@ -13,9 +13,26 @@ const MODEL_IDS: Record<Tier, string> = {
   opus: 'claude-opus-5-5',
 }
 
-// Keep any provider prefix the session's model id carries (e.g. Bedrock's "anthropic.").
-function modelId(current: string, tier: Tier): string {
-  const prefix = current.match(/^(.*?)claude-/)?.[1] ?? ''
+// Session model ids this router knows how to rewrite, by provider format:
+//   first-party API   claude-opus-5-5, claude-haiku-4-5-20251001 (dated snapshot)
+//   Google Vertex AI  claude-opus-5-5 (current models take the bare first-party id)
+//   Bedrock (Mantle)  anthropic.claude-opus-5-5
+//   Bedrock (Invoke)  us.anthropic.claude-opus-5-5, global.anthropic.claude-opus-5-5, ...
+// Claude 5.x ids carry no version suffix on any provider, so MODEL_IDS plus the session's
+// prefix is the whole id. Anything else (a Bedrock "-v1:0" suffix, a Vertex "@date"
+// snapshot, an ARN, a "[1m]" variant, an unknown prefix) is unrecognised: the target
+// tier's suffix can't be derived from it, so the request is left unchanged.
+const BEDROCK_PREFIX = /^(?:(?:us|us-gov|eu|apac|jp|au|global)\.)?anthropic\.$/
+const SESSION_ID = /^(.*?)claude-[a-z]+-\d+(?:-\d+)?(-\d{8})?$/
+
+// The full model id for `tier` in the session model's provider format, or undefined
+// when that format isn't recognised.
+function modelId(current: string, tier: Tier): string | undefined {
+  const m = current.match(SESSION_ID)
+  if (!m) return undefined
+  const [, prefix = '', dated] = m
+  if (prefix === '') return MODEL_IDS[tier] // first-party or Vertex
+  if (dated || !BEDROCK_PREFIX.test(prefix)) return undefined
   return prefix + MODEL_IDS[tier]
 }
 
@@ -50,11 +67,17 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Classify each prompt before it enters the session.
+  // Classify each prompt the person typed before it enters the session. Every
+  // submission clears the previous route first, so a turn that isn't classified (a slash
+  // command, a background task's notification, a peer's message) runs on the session model.
   on('prompt.submit', async ($, e, next) => {
-    if (enabled && e.text.trim() && !e.text.trimStart().startsWith('/')) {
-      route = undefined // never reuse a stale route if classification throws
-      route = await classify($, e.text)
+    route = undefined
+    if (enabled && isUserPrompt(e.origin) && e.text.trim() && !e.text.trimStart().startsWith('/')) {
+      try {
+        route = await classify($, e.text)
+      } catch {
+        route = undefined // a classifier error must never block the prompt
+      }
       if (route) {
         counts[route.model] += 1
         $.ui.status(`router → ${route.model} · ${route.effort}`)
@@ -65,13 +88,22 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A slash command (e.g. /security-review) may start a turn of its own: run it on the
+  // session model rather than whatever the last prompt was routed to.
+  on('command.run', async ($, e, next) => {
+    if (e.command !== 'router') route = undefined
+    return next(e)
+  })
+
   // Rewrite every main-thread model request of the turn to the routed model.
   // Subagents keep their own configured models.
   on('turn.step', async function* ($, e, next) {
     if (!enabled || !route || e.agentId !== undefined) {
       return yield* next(e)
     }
-    return yield* next({ ...e, model: modelId(e.model, route.model), effort: route.effort })
+    const model = modelId(e.model, route.model)
+    if (!model) return yield* next(e) // unrecognised id format: leave the request alone
+    return yield* next({ ...e, model, effort: route.effort })
   })
 
   on('command.run', { command: 'router' }, async ($, e) => {
@@ -95,6 +127,21 @@ export const register: Register = on => {
       ].join('\n'),
     }
   })
+}
+
+// Prompts that are the person's own words. Absent origin means the user's own.
+function isUserPrompt(origin: PromptOrigin | undefined): boolean {
+  if (!origin) return true
+  switch (origin.kind) {
+    case 'composer':
+    case 'bridge':
+    case 'sdk':
+      return true
+    case 'plugin':
+      return origin.asUser === true
+    default:
+      return false
+  }
 }
 
 async function classify($: EngineInterface, text: string): Promise<Route | undefined> {
