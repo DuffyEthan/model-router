@@ -113,6 +113,21 @@ class EndToEndMocked(NoSubprocess):
             data = json.loads(path.read_text())
             return data, out.getvalue(), path
 
+    def test_results_file_is_compact_one_line_per_case(self):
+        data = {"summary": {"overall": {"ok": 1}}, "runs_per_case": 3,
+                "cases": [{"id": f"c{i}", "runs": [{"raw": "x", "usage": {"input_tokens": 1}}] * 3} for i in range(40)]}
+        text = ev.dumps_results(data)
+        self.assertEqual(json.loads(text), data)
+        self.assertEqual(sum(l.startswith('    {"id"') for l in text.splitlines()), 40)
+        self.assertLess(len(text.splitlines()), 60)
+
+    def test_slim_usage_keeps_only_token_counts(self):
+        full = {"input_tokens": 2, "output_tokens": 38, "cache_creation_input_tokens": 5,
+                "cache_read_input_tokens": 7, "service_tier": "standard", "iterations": [{}]}
+        self.assertEqual(ev.slim_usage(full), {"input_tokens": 2, "output_tokens": 38,
+                                               "cache_creation_input_tokens": 5, "cache_read_input_tokens": 7})
+        self.assertIsNone(ev.slim_usage(None))
+
     def test_results_file_and_split_accuracy(self):
         cases = {c["id"]: c for c in ev.load_cases()}
         orig_id = next(i for i, c in cases.items() if c["set"] == "original")
