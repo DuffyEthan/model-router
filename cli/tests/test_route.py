@@ -23,8 +23,18 @@ def claude_json(structured=None, result="", cost=0.0003):
 
 class ClassifyTests(unittest.TestCase):
     def run_classify(self, proc):
-        with mock.patch.object(route.subprocess, "run", return_value=proc) as run:
+        with mock.patch.object(route.subprocess, "run", return_value=proc) as run, \
+             mock.patch("sys.stderr", new_callable=io.StringIO):
             return route.classify("hello"), run
+
+    def assert_session_default(self, **run_kwargs):
+        with mock.patch.object(route.subprocess, "run", **run_kwargs), \
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            d = route.classify("hello")
+        self.assertEqual(d, route.SESSION_DEFAULT)
+        self.assertIsNone(d["model"])
+        self.assertIsNone(d["effort"])
+        self.assertIn("using the session model", err.getvalue())
 
     def test_uses_structured_output(self):
         d, _ = self.run_classify(completed(claude_json({"model": "opus", "effort": "xhigh", "reason": "hard"})))
@@ -35,21 +45,37 @@ class ClassifyTests(unittest.TestCase):
         d, _ = self.run_classify(completed(claude_json(result='{"model":"haiku","effort":"low","reason":"x"}')))
         self.assertEqual(d["model"], "haiku")
 
-    def test_invalid_model_falls_back(self):
-        d, _ = self.run_classify(completed(claude_json({"model": "gpt", "effort": "low", "reason": "x"})))
-        self.assertEqual(d["model"], route.FALLBACK["model"])
+    def test_unknown_model_uses_session_default(self):
+        # The plugin leaves the session model alone when the classifier names an unknown model.
+        self.assert_session_default(
+            return_value=completed(claude_json({"model": "gpt", "effort": "low", "reason": "x"})))
 
-    def test_non_json_output_falls_back(self):
-        d, _ = self.run_classify(completed("not json"))
-        self.assertEqual(d, route.FALLBACK)
+    def test_missing_model_uses_session_default(self):
+        self.assert_session_default(return_value=completed(claude_json({"effort": "low", "reason": "x"})))
 
-    def test_timeout_falls_back(self):
-        with mock.patch.object(route.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 60)):
-            self.assertEqual(route.classify("hello"), route.FALLBACK)
+    def test_non_object_reply_uses_session_default(self):
+        self.assert_session_default(return_value=completed(claude_json(result='["opus"]')))
 
-    def test_missing_claude_cli_falls_back(self):
-        with mock.patch.object(route.subprocess, "run", side_effect=FileNotFoundError):
-            self.assertEqual(route.classify("hello"), route.FALLBACK)
+    def test_non_json_output_uses_session_default(self):
+        self.assert_session_default(return_value=completed("not json"))
+
+    def test_unparseable_result_text_uses_session_default(self):
+        self.assert_session_default(return_value=completed(claude_json(result="I think opus")))
+
+    def test_timeout_uses_session_default(self):
+        self.assert_session_default(side_effect=subprocess.TimeoutExpired("claude", 60))
+
+    def test_missing_claude_cli_uses_session_default(self):
+        self.assert_session_default(side_effect=FileNotFoundError)
+
+    def test_unknown_effort_keeps_model_at_medium(self):
+        # Mirrors the plugin: a valid model with a bad effort is kept, effort becomes medium.
+        d, _ = self.run_classify(completed(claude_json({"model": "opus", "effort": "max", "reason": "x"})))
+        self.assertEqual((d["model"], d["effort"]), ("opus", "medium"))
+
+    def test_missing_reason_is_tolerated(self):
+        d, _ = self.run_classify(completed(claude_json({"model": "haiku", "effort": "low"})))
+        self.assertEqual((d["model"], d["reason"]), ("haiku", ""))
 
     def test_classifier_is_cheap_and_isolated(self):
         _, run = self.run_classify(completed(claude_json({"model": "haiku", "effort": "low", "reason": "x"})))
@@ -60,6 +86,12 @@ class ClassifyTests(unittest.TestCase):
         self.assertIn("--no-session-persistence", cmd)
         self.assertIn("--strict-mcp-config", cmd)
 
+    def test_classifier_gets_plugin_prompt_and_framing(self):
+        _, run = self.run_classify(completed(claude_json({"model": "haiku", "effort": "low", "reason": "x"})))
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--system-prompt") + 1], route.SYSTEM_PROMPT)
+        self.assertEqual(cmd[-1], "<new_message>\nhello\n</new_message>")
+
 
 class MainTests(unittest.TestCase):
     def run_main(self, argv, decision=None, stdin=None):
@@ -69,9 +101,39 @@ class MainTests(unittest.TestCase):
              mock.patch.object(route, "log") as log, \
              mock.patch.object(route.os, "execvp") as execvp, \
              mock.patch.object(sys, "stdin", stdin or io.StringIO()), \
-             mock.patch("sys.stderr", new_callable=io.StringIO):
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             route.main()
+        self.stderr = err.getvalue()
         return classify, log, execvp
+
+    def test_classifier_failure_launches_with_session_model(self):
+        _, _, execvp = self.run_main(["do a thing", "--", "--permission-mode", "plan"],
+                                     decision=route.SESSION_DEFAULT)
+        cmd = execvp.call_args.args[1]
+        self.assertEqual(cmd, ["claude", "--permission-mode", "plan", "do a thing"])
+        self.assertNotIn("--model", cmd)
+        self.assertNotIn("--effort", cmd)
+        self.assertIn("session model", self.stderr)
+
+    def test_classifier_failure_keeps_explicit_effort(self):
+        # An effort the user typed is their choice, not the router's, so it survives a failure.
+        _, _, execvp = self.run_main(["--effort", "high", "do a thing"], decision=route.SESSION_DEFAULT)
+        self.assertEqual(execvp.call_args.args[1], ["claude", "--effort", "high", "do a thing"])
+
+    def test_classifier_timeout_end_to_end(self):
+        with mock.patch.object(sys, "argv", ["route", "do a thing"]), \
+             mock.patch.object(route.subprocess, "run", side_effect=subprocess.TimeoutExpired("claude", 60)), \
+             mock.patch.object(route, "log"), \
+             mock.patch.object(route.os, "execvp") as execvp, \
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            route.main()
+        self.assertEqual(execvp.call_args.args[1], ["claude", "do a thing"])
+        self.assertIn("classifier failed", err.getvalue())
+
+    def test_classifier_failure_dry_run(self):
+        _, _, execvp = self.run_main(["--dry-run", "do a thing"], decision=route.SESSION_DEFAULT)
+        execvp.assert_not_called()
+        self.assertIn("[router] → session model: classifier failed", self.stderr)
 
     def test_dry_run_does_not_launch_claude(self):
         _, log, execvp = self.run_main(["--dry-run", "do a thing"])
@@ -123,6 +185,68 @@ class MainTests(unittest.TestCase):
              mock.patch("sys.stderr", new_callable=io.StringIO), \
              self.assertRaises(SystemExit):
             route.main()
+
+
+class ValidationTests(unittest.TestCase):
+    def run_invalid(self, argv, decision=None):
+        """Run main() expecting a validation error; return (exit code, stderr, mocks)."""
+        decision = decision or {"model": "sonnet", "effort": "medium", "reason": "coding"}
+        with mock.patch.object(sys, "argv", ["route", *argv]), \
+             mock.patch.object(route, "classify", return_value=dict(decision)) as classify, \
+             mock.patch.object(route, "log"), \
+             mock.patch.object(route.os, "execvp") as execvp, \
+             mock.patch.object(sys, "stdin", io.StringIO()), \
+             mock.patch("sys.stderr", new_callable=io.StringIO), \
+             self.assertRaises(SystemExit) as cm:
+            route.main()
+        execvp.assert_not_called()
+        self.assertNotIn(cm.exception.code, (0, None))
+        return str(cm.exception.code), classify
+
+    def test_invalid_model_flag(self):
+        msg, classify = self.run_invalid(["--model", "gpt-4", "do a thing"])
+        self.assertIn("invalid model 'gpt-4'", msg)
+        self.assertIn("haiku, sonnet, opus", msg)
+        classify.assert_not_called()
+
+    def test_empty_model_flag_is_rejected_not_ignored(self):
+        msg, classify = self.run_invalid(["--model", "", "do a thing"])
+        self.assertIn("invalid model ''", msg)
+        classify.assert_not_called()
+
+    def test_invalid_effort_flag(self):
+        msg, classify = self.run_invalid(["--effort", "max", "do a thing"])
+        self.assertIn("invalid effort 'max'", msg)
+        self.assertIn("low, medium, high, xhigh", msg)
+        classify.assert_not_called()  # no classifier call wasted on a bad flag
+
+    def test_invalid_effort_with_forced_model(self):
+        msg, _ = self.run_invalid(["--model", "opus", "--effort", "HIGH", "do a thing"])
+        self.assertIn("invalid effort 'HIGH'", msg)
+
+    def test_invalid_flags_rejected_on_dry_run_too(self):
+        msg, _ = self.run_invalid(["--dry-run", "--model", "o", "do a thing"])
+        self.assertIn("invalid model 'o'", msg)
+
+    def test_build_command_refuses_unknown_model(self):
+        # Belt and braces: even a decision that skipped classify()'s checks can't reach exec.
+        msg, _ = self.run_invalid(["do a thing"], decision={"model": "gpt", "effort": "low", "reason": "x"})
+        self.assertIn("invalid model 'gpt'", msg)
+
+    def test_build_command_refuses_unknown_effort(self):
+        msg, _ = self.run_invalid(["do a thing"], decision={"model": "opus", "effort": "max", "reason": "x"})
+        self.assertIn("invalid effort 'max'", msg)
+
+    def test_all_allowed_values_pass(self):
+        for model in route.MODELS:
+            for effort in route.EFFORTS:
+                cmd = route.build_command({"model": model, "effort": effort}, [], False, "p")
+                self.assertEqual(cmd, ["claude", "--model", model, "--effort", effort, "p"])
+
+    def test_schema_matches_allowed_values(self):
+        props = route.SCHEMA["properties"]
+        self.assertEqual(tuple(props["model"]["enum"]), route.MODELS)
+        self.assertEqual(tuple(props["effort"]["enum"]), route.EFFORTS)
 
 
 class LogTests(unittest.TestCase):
