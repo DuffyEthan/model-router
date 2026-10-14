@@ -1,9 +1,27 @@
 import type { EngineInterface, ModelEffort, PromptOrigin, Register } from 'claude-code'
+import {
+  appendCapped,
+  asLog,
+  classifierPrice,
+  classifyOrigin,
+  formatStats,
+  LOG_KEY,
+  toJsonl,
+  toUsage,
+  type ClassifierUsage,
+  type LogRecord,
+  type Outcome,
+  type PromptRecord,
+  type SkipReason,
+} from './tracker'
 
 type Tier = 'haiku' | 'sonnet' | 'opus'
 type Route = { model: Tier; effort: ModelEffort; reason: string }
+type Classified = { route?: Route; outcome: Exclude<Outcome, 'skipped'>; usage?: ClassifierUsage }
 
 const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus']
+const CLASSIFIER_TIMEOUT_MS = 20000
+const USAGE = 'Usage: /router [on|off|status|stats|export [path]]'
 const EFFORTS: readonly ModelEffort[] = ['low', 'medium', 'high', 'xhigh']
 
 // turn.step takes full model ids, not aliases. Update these when new models ship.
@@ -62,7 +80,7 @@ export const register: Register = on => {
     enabled = (await $.store.get('enabled')) !== false
     await $.command.register({
       name: 'router',
-      description: 'Model router: /router [on|off|status]',
+      description: 'Model router: /router [on|off|status|stats|export [path]]',
     })
     return next(e)
   })
@@ -72,12 +90,29 @@ export const register: Register = on => {
   // command, a background task's notification, a peer's message) runs on the session model.
   on('prompt.submit', async ($, e, next) => {
     route = undefined
-    if (enabled && isUserPrompt(e.origin) && e.text.trim() && !e.text.trimStart().startsWith('/')) {
+    const ts = await nowIso($) // when the prompt arrived, for joining with transcripts
+    const isUser = isUserPrompt(e.origin)
+    const text = e.text
+    let skip: SkipReason | undefined
+    let outcome: Outcome = 'skipped'
+    let usage: ClassifierUsage | undefined
+    let latencyMs: number | null = null
+    if (!enabled) skip = 'off'
+    else if (!isUser) skip = 'non-user'
+    else if (!text.trim()) skip = 'empty'
+    else if (text.trimStart().startsWith('/')) skip = 'slash'
+    else {
+      const t0 = await elapsedStart($)
+      let c: Classified
       try {
-        route = await classify($, e.text)
+        c = await classify($, text)
       } catch {
-        route = undefined // a classifier error must never block the prompt
+        c = { outcome: 'failed' } // a classifier error must never block the prompt
       }
+      latencyMs = await elapsedSince($, t0)
+      route = c.route
+      outcome = c.outcome
+      usage = c.usage
       if (route) {
         counts[route.model] += 1
         $.ui.status(`router → ${route.model} · ${route.effort}`)
@@ -85,7 +120,54 @@ export const register: Register = on => {
         $.ui.status('router → session model (classifier failed)')
       }
     }
-    return next(e)
+    // Build the record from metadata only (never the prompt text), then let the
+    // prompt in first so logging adds no latency to it.
+    const record: PromptRecord = {
+      v: 1,
+      kind: 'prompt',
+      ts,
+      session: null,
+      tier: route ? route.model : 'session',
+      effort: route ? route.effort : 'session',
+      latencyMs,
+      outcome,
+      ...(skip ? { skip } : {}),
+      origin: classifyOrigin(text, isUser),
+      originKind: e.origin?.kind ?? 'none',
+      midTurn: e.turnId !== undefined,
+      ...(usage ? { usage } : {}),
+    }
+    const result = await next(e)
+    try {
+      record.session = await sessionId($)
+      await log($, record)
+    } catch {
+      // logging never alters the prompt's outcome
+    }
+    return result
+  })
+
+  // A manual /model (or picker / SDK set_model) change is a misroute signal. Automatic
+  // switches (fallback, resume) are not the person overriding the router.
+  on('classic.PostModelSwitch', async ($, e, next) => {
+    const result = await next(e)
+    try {
+      if (e.source === 'command' || e.source === 'picker' || e.source === 'sdk') {
+        await log($, {
+          v: 1,
+          kind: 'override',
+          ts: await nowIso($),
+          session: await sessionId($),
+          action: 'model',
+          from: e.from_model,
+          to: e.to_model,
+          source: e.source,
+        })
+      }
+    } catch {
+      // never let logging fail the hook
+    }
+    return result
   })
 
   // A slash command (e.g. /security-review) may start a turn of its own: run it on the
@@ -108,6 +190,16 @@ export const register: Register = on => {
 
   on('command.run', { command: 'router' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
+    if (arg === 'stats') {
+      return { text: formatStats(await readLog($), await readClassifierPrice($)) }
+    }
+    if (arg === 'export' || arg.startsWith('export ')) {
+      try {
+        return { text: await exportLog($, e.args.trim().slice('export'.length).trim()) }
+      } catch (err) {
+        return { text: `Export failed: ${err instanceof Error ? err.message : String(err)}` }
+      }
+    }
     if (arg === 'on' || arg === 'off') {
       enabled = arg === 'on'
       await $.store.set('enabled', enabled)
@@ -115,8 +207,19 @@ export const register: Register = on => {
         route = undefined
         $.ui.status(undefined)
       }
+      try {
+        await log($, {
+          v: 1,
+          kind: 'override',
+          ts: await nowIso($),
+          session: await sessionId($),
+          action: enabled ? 'router-on' : 'router-off',
+        })
+      } catch {
+        // logging never blocks the command
+      }
     } else if (arg && arg !== 'status') {
-      return { text: 'Usage: /router [on|off|status]' }
+      return { text: USAGE }
     }
     const last = route ? `${route.model} · ${route.effort} — ${route.reason}` : 'none yet'
     return {
@@ -144,7 +247,24 @@ function isUserPrompt(origin: PromptOrigin | undefined): boolean {
   }
 }
 
-async function classify($: EngineInterface, text: string): Promise<Route | undefined> {
+async function elapsedStart($: EngineInterface): Promise<number | undefined> {
+  try {
+    return await $.clock.now()
+  } catch {
+    return undefined
+  }
+}
+
+async function elapsedSince($: EngineInterface, t0: number | undefined): Promise<number | null> {
+  if (t0 === undefined) return null
+  try {
+    return Math.max(0, Math.round((await $.clock.now()) - t0))
+  } catch {
+    return null
+  }
+}
+
+async function classify($: EngineInterface, text: string): Promise<Classified> {
   let context = ''
   try {
     const messages = await $.session.messages()
@@ -169,18 +289,86 @@ async function classify($: EngineInterface, text: string): Promise<Route | undef
     system: SYSTEM,
     prompt,
     maxTokens: 300,
-    timeoutMs: 20000,
+    timeoutMs: CLASSIFIER_TIMEOUT_MS,
   })
-  if (!r.isAnswered) return undefined
+  const usage = toUsage(r?.usage)
+  if (!r.isAnswered) {
+    // 'aborted' is the timeoutMs cut (or the turn's own abort); everything else failed.
+    return { outcome: r.reason === 'aborted' ? 'timeout' : 'failed', usage }
+  }
 
   const json = r.text.match(/\{[\s\S]*\}/)?.[0]
-  if (!json) return undefined
+  if (!json) return { outcome: 'failed', usage }
   try {
     const d = JSON.parse(json) as Partial<Route>
-    if (!d.model || !TIERS.includes(d.model)) return undefined
+    if (!d.model || !TIERS.includes(d.model)) return { outcome: 'failed', usage }
     const effort = d.effort && EFFORTS.includes(d.effort) ? d.effort : 'medium'
-    return { model: d.model, effort, reason: String(d.reason ?? '') }
+    return { route: { model: d.model, effort, reason: String(d.reason ?? '') }, outcome: 'ok', usage }
+  } catch {
+    return { outcome: 'failed', usage }
+  }
+}
+
+// ---- Routing log I/O. Every helper swallows its own errors: logging never blocks or
+// alters routing. Records are built from metadata only, never from prompt text.
+
+async function nowIso($: EngineInterface): Promise<string> {
+  try {
+    return new Date(await $.clock.now()).toISOString()
+  } catch {
+    return new Date().toISOString()
+  }
+}
+
+async function sessionId($: EngineInterface): Promise<string | null> {
+  try {
+    const id = await $.session.id()
+    return typeof id === 'string' ? id : null
+  } catch {
+    return null
+  }
+}
+
+async function readLog($: EngineInterface): Promise<LogRecord[]> {
+  try {
+    return asLog(await $.store.get(LOG_KEY))
+  } catch {
+    return []
+  }
+}
+
+// Log appends run one after another so records written close together are all kept.
+let logChain: Promise<void> = Promise.resolve()
+
+function log($: EngineInterface, record: LogRecord): Promise<void> {
+  logChain = logChain.then(() => appendLog($, record)).catch(() => undefined)
+  return logChain
+}
+
+async function appendLog($: EngineInterface, record: LogRecord): Promise<void> {
+  try {
+    await $.store.set(LOG_KEY, appendCapped(await readLog($), record))
+  } catch {
+    // a full or unwritable store loses this record, nothing else
+  }
+}
+
+async function readClassifierPrice($: EngineInterface) {
+  try {
+    return classifierPrice(await $.fs.read(`${$.plugin.root}/hooks/prices.json`))
   } catch {
     return undefined
   }
+}
+
+// Writes the log as JSON Lines for scripts/router_report.py --log.
+async function exportLog($: EngineInterface, arg: string): Promise<string> {
+  const records = await readLog($)
+  let path = arg
+  if (!path) {
+    const dir = (await $.env.get('CLAUDE_CONFIG_DIR')) ?? `${(await $.env.get('HOME')) ?? '.'}/.claude`
+    path = `${dir}/model-router/routing-log.jsonl`
+  }
+  await $.fs.write(path, toJsonl(records))
+  return `Wrote ${records.length} routing-log records to ${path}\n(python3 scripts/router_report.py --log ${path})`
 }
