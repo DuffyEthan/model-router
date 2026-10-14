@@ -24,6 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/DuffyEthan/model-router/main/instal
 
 Use `--plugin-only` or `--cli-only` to install just one: `... | sh -s -- --plugin-only`.
 
+The installer always downloads `route` from a pinned release tag (currently `v0.1.0`) and checks its SHA-256 against the value in `install.sh` before installing; it never copies files from the current directory. The plugin install follows the default branch, because `claude plugin install` can't pin a tag.
+
 **Or install just the plugin** from a terminal:
 
 ```bash
@@ -138,11 +140,11 @@ echo "prompt" | route -p       # prompt from stdin
 
 How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
 
-To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
+To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. If the classifier fails (error, timeout or an unusable reply), `route` prints a note to stderr and starts `claude` with no `--model` or `--effort` from the router, so you get the session default, like the plugin. `--model` and `--effort` are checked before anything runs; an invalid value exits with an error listing the allowed ones. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
 
 ## Tuning
 
-- **Routing rules:** edit `SYSTEM` in [`plugin/hooks/register.ts`](plugin/hooks/register.ts) (plugin) or `SYSTEM_PROMPT` in [`cli/route.py`](cli/route.py) (CLI). The defaults lean toward the cheaper model when two tiers are close, except for high-stakes work.
+- **Routing rules:** edit `SYSTEM` in [`plugin/hooks/register.ts`](plugin/hooks/register.ts) (plugin) and `SYSTEM_PROMPT` in [`cli/route.py`](cli/route.py) (CLI). Keep the two identical: `cli/tests/test_prompt_parity.py` fails if they drift. The defaults lean toward the cheaper model when two tiers are close, except for high-stakes work.
 - **Model IDs:** the plugin needs full model IDs. When new models ship, update `MODEL_IDS` in `register.ts`.
 
 ## Benefits and drawbacks
@@ -254,9 +256,14 @@ plugin/                           # the Claude Code plugin
   hooks/hooks.json
   hooks/register.ts
 cli/route.py                      # the standalone `route` wrapper
+  hooks/tracker.ts                #   routing log used by /router stats and the report
+  hooks/prices.json               #   price table (source URL and date inside)
 cli/tests/                        # CLI unit tests
 plugin/tests/                     # plugin tests (claude plugin test)
+scripts/router_report.py          # cost & routing report (see Measure it yourself)
+scripts/tests/                    # report tests on synthetic transcripts
 evals/                            # routing-quality and end-to-end evals (real model calls)
+evals/results/                    # committed results of each eval run
 install.sh                        # one-line installer
 ```
 
@@ -266,12 +273,16 @@ install.sh                        # one-line installer
 make test          # everything
 make test-cli      # Python unit tests for the route CLI (stdlib only)
 make test-plugin   # validates and tests the plugin with `claude plugin test` (no API calls)
+make test-scripts  # tests for scripts/router_report.py against synthetic transcripts
+make test-installer # lints install.sh and runs it offline: pinned checksum, tampered file, no hash tool
+make test-evals    # offline tests for the eval scripts (classifier calls faked)
 ```
 
-- `plugin/tests/router.test.ts`: 15 tests that run the real plugin against a mocked engine. They cover routing to each tier, full model IDs (including provider prefixes), fail-safe behaviour (garbage replies, bad JSON, unknown models, a classifier that fails or throws), subagents being left alone, slash commands not being classified, and `/router on|off|status` including the saved off setting.
-- `cli/tests/test_route.py`: 18 tests for the CLI's classification, fallbacks, flag handling, stdin, and logging.
+- `plugin/tests/router.test.ts` and `tracker.test.ts`: 70 tests that run the real plugin against a mocked engine. They cover routing to each tier, full model IDs for the first-party API, Bedrock and Vertex (and leaving unrecognised IDs alone), a stale route never carrying over to slash commands or non-user turns, fail-safe behaviour (garbage replies, bad JSON, unknown models, a classifier that fails or throws), subagents being left alone, slash commands not being classified, `/router on|off|status|stats|export` including the saved off setting, and the routing log (which never stores prompt text).
+- `cli/tests/`: 42 tests for the CLI's classification, fallbacks, input validation, flag handling, stdin and logging, plus a check that its router prompt matches the plugin's.
+- `scripts/tests/`: 20 tests for the cost report, with costs worked out by hand, including a session with model switches and a Haiku request over 100K tokens.
 
-CI runs the CLI tests and basic checks on every push. The plugin tests need the `claude` CLI, so run them locally.
+CI runs all of these on every push. The plugin job installs a pinned Claude Code version; the plugin tests need no login or API key.
 
 These tests fake Haiku's replies, so they check the *plumbing*, not whether Haiku picks well. Routing quality is checked by the evals below.
 
@@ -280,23 +291,24 @@ These tests fake Haiku's replies, so they check the *plumbing*, not whether Haik
 The evals make real model calls and cost a little.
 
 ```bash
-python3 evals/routing_eval.py   # ~100 real Haiku classifications, ~$0.02
+python3 evals/routing_eval.py   # 195 real Haiku classifications, ~$0.04
 python3 evals/e2e.py            # real plugin in real sessions; checks which model answered
 ```
 
-- **`evals/routing_eval.py`** runs the plugin's actual router prompt (read from `register.ts`) on 33 labelled prompts in [`evals/cases.jsonl`](evals/cases.jsonl): 10 easy, 10 everyday coding, 10 hard, and 3 follow-ups with conversation context. Each runs 3 times to check consistency. It reports correct-tier rate, **under-routing** (too cheap, so a risk of weak answers) and **over-routing** (too expensive, so wasted money). 10 of the 33 cases are borderline and accept either of two tiers.
+- **`evals/routing_eval.py`** runs the plugin's actual router prompt (read from `register.ts`) on 65 labelled prompts: 33 in [`evals/cases.jsonl`](evals/cases.jsonl) (10 easy, 10 everyday coding, 10 hard, and 3 follow-ups with conversation context) and a held-out set of 32 in [`evals/cases_heldout.jsonl`](evals/cases_heldout.jsonl), written without looking at the router prompt and reported separately. Each runs 3 times to check consistency. It reports correct-tier rate, **under-routing** (too cheap, so a risk of weak answers) and **over-routing** (too expensive, so wasted money). Borderline cases accept either of two tiers (10 of the 33, 13 of the 32 held-out). Each run is saved to [`evals/results/`](evals/results/) with the model IDs, a hash of the router prompt and every reply; see [`evals/README.md`](evals/README.md) for what each number does and doesn't measure.
 
-What this measures: how often Haiku agrees with labels I wrote myself, and whether it agrees consistently across runs. It's a routing-consistency check. It doesn't measure answer quality, and 33 hand-labelled prompts are a small sample.
+What this measures: how often Haiku agrees with labels I wrote myself, and whether it agrees consistently across runs. It's a routing-consistency check. It doesn't measure answer quality, and 65 prompts labelled by one person are a small sample.
 - **`evals/e2e.py`** starts headless Claude Code sessions on `--model opus` with the plugin loaded, sends real prompts, and checks from the session's usage report which model actually answered.
 
-Latest results (Claude Code 2.1.296, Haiku 5.5, October 2026):
+Latest results (Claude Code 2.1.296, Haiku 5.5, 2026-10-14; full data in [`evals/results/2026-10-14.json`](evals/results/2026-10-14.json)):
 
 | Eval | Result |
 |---|---|
-| Routing agreement (33 self-labelled prompts × 3 runs; 10 accept two tiers) | **96/99 (97%)** matched the label; **0 over-routed**; 3 under-routed, all one borderline case (a SQL "top 3 orders per customer" query sent to Haiku) |
+| Routing agreement, original set (33 prompts × 3 runs) | **96/99 (97%)** matched the label; 0 over-routed; 3 under-routed, all one case (a SQL "three most recent orders per customer" query sent to Haiku). Same tier every run on 31/33. |
+| Routing agreement, held-out set (32 prompts × 3 runs) | **94/96 (98%)** matched the label; 0 under-routed; 2 over-routed, both one case ("ok go ahead with option 2" with no context, sent to Opus 2 of 3 times). Same tier every run on 27/32. |
 | Follow-ups ("yes, do it" after an Opus plan) | Stays on Opus 6/6, after the follow-up rule was tightened. Before that, it dropped to Sonnet 1/3 of the time. |
 | Cost per classification | ~$0.0002 (see [Cost of a classification](#cost-of-a-classification)) |
-| End-to-end (6 prompts, sessions started on Opus) | **6/6** answered by the expected model: Haiku for both easy prompts, Sonnet for both coding prompts, Opus for both hard ones. Cost $0.01–0.05 per prompt, including the answer. |
+| End-to-end (6 prompts, sessions started on Opus) | **6/6** answered by the expected model: Haiku for both easy prompts, Sonnet for both coding prompts, Opus for both hard ones. API-equivalent cost per prompt, including the answer, ranged from under $0.001 (Haiku) to $0.77 (a long Opus answer); $0.91 for all six. |
 
 To tune the router, change `SYSTEM` in `register.ts`, rerun `routing_eval.py`, and compare. Add your own prompts to `cases.jsonl` so the eval matches how you actually work.
 
