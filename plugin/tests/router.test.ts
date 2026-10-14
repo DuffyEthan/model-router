@@ -73,15 +73,6 @@ describe('routing', () => {
     expect(sent[0]).toEqual({ model: 'claude-sonnet-5-5', effort: 'medium' })
   })
 
-  test('keeps a provider prefix on the model id', async ($, on) => {
-    world(on, '{"model":"opus","effort":"xhigh","reason":"hard"}')
-    const sent = captureStep(on)
-    await start($)
-    await submit($, 'design the migration')
-    await step($, { model: 'anthropic.claude-sonnet-5-5' })
-    expect(sent[0]?.model).toBe('anthropic.claude-opus-5-5')
-  })
-
   test('tolerates prose around the JSON and bad effort', async ($, on) => {
     world(on, 'Sure! {"model":"sonnet","effort":"turbo","reason":"x"} done')
     const sent = captureStep(on)
@@ -91,6 +82,51 @@ describe('routing', () => {
     expect(sent[0]).toEqual({ model: 'claude-sonnet-5-5', effort: 'medium' })
   })
 
+})
+
+describe('provider model ids', () => {
+  // Session model id -> id the routed (opus) request should carry. Claude 5.x ids have no
+  // version suffix on any provider, so the session's prefix is all that carries over.
+  for (const [session, expected] of [
+    ['claude-sonnet-5-5', 'claude-opus-5-5'], // first-party API, and Vertex AI (bare id)
+    ['claude-haiku-4-5-20251001', 'claude-opus-5-5'], // first-party dated snapshot
+    ['anthropic.claude-sonnet-5-5', 'anthropic.claude-opus-5-5'], // Bedrock Mantle / base id
+    ['us.anthropic.claude-sonnet-5-5', 'us.anthropic.claude-opus-5-5'], // Bedrock regional profile
+    ['eu.anthropic.claude-sonnet-5-5', 'eu.anthropic.claude-opus-5-5'],
+    ['apac.anthropic.claude-sonnet-5-5', 'apac.anthropic.claude-opus-5-5'],
+    ['us-gov.anthropic.claude-sonnet-5-5', 'us-gov.anthropic.claude-opus-5-5'],
+    ['global.anthropic.claude-sonnet-5-5', 'global.anthropic.claude-opus-5-5'], // Bedrock global profile
+  ] as const) {
+    test(`routes ${session} to ${expected}`, async ($, on) => {
+      world(on, '{"model":"opus","effort":"xhigh","reason":"hard"}')
+      const sent = captureStep(on)
+      await start($)
+      await submit($, 'design the migration')
+      await step($, { model: session })
+      expect(sent[0]).toEqual({ model: expected, effort: 'xhigh' })
+    })
+  }
+
+  // Formats whose suffix for another tier can't be derived: leave the request unchanged.
+  for (const session of [
+    'us.anthropic.claude-opus-5-5-v1:0', // Bedrock "-vN:M" suffix
+    'anthropic.claude-haiku-4-5-20251001-v1:0', // Bedrock ARN-versioned base id
+    'global.anthropic.claude-opus-4-6-v1', // Bedrock "-vN" suffix
+    'claude-haiku-4-5@20251001', // Vertex dated snapshot
+    'arn:aws:bedrock:us-east-2:123456789012:application-inference-profile/opus-prod',
+    'claude-opus-4-6[1m]',
+    'mycorp.claude-opus-5-5', // unknown provider prefix
+    'us.anthropic.claude-opus-5-5-20260101', // dated id with a Bedrock prefix
+  ]) {
+    test(`leaves unrecognised id ${session} unchanged`, async ($, on) => {
+      world(on, HAIKU)
+      const sent = captureStep(on)
+      await start($)
+      await submit($, 'hi')
+      await step($, { model: session })
+      expect(sent).toEqual([{ model: session, effort: STEP.effort }])
+    })
+  }
 })
 
 describe('stale routes', () => {
