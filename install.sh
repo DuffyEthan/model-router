@@ -13,10 +13,8 @@ set -eu
 # Update both values together on each release. To get them, run
 #   make release-checksums TAG=vX.Y.Z
 # and paste the output here.
-# NOTE: no release tag exists yet, so MR_REF is an interim pin to a full commit
-# SHA on main. Replace it with the first release tag once one is cut.
-MR_REF="23f05606051c59f8d0984e98614f41cf9ae0a185"
-MR_ROUTE_PY_SHA256="8c4143ffbf04259fcb13afb41da92dc63e063984cc7e5f0444d0ebcbd380ad7b"
+MR_REF="v0.1.0"
+MR_ROUTE_PY_SHA256="b58e418fc577541abdc39df1ce463538b2cc013f4cb875b5257e6cc310200583"
 # -------------------------------------------------------------------------------
 
 REPO="DuffyEthan/model-router"
