@@ -2,6 +2,7 @@ name: test
 on: [push, pull_request]
 jobs:
   cli-and-installer:
+    # Together with the plugin job this covers every target in `make test`.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -14,6 +15,10 @@ jobs:
           python-version: "3.12"
       - name: CLI unit tests
         run: make test-cli
+      - name: Cost report tests
+        run: make test-scripts
+      - name: Eval script tests (offline, classifier faked)
+        run: make test-evals
       - name: Installer (lint, pinned checksum, offline install tests)
         run: make test-installer
       - name: Manifests are valid JSON
