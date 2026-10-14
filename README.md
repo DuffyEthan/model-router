@@ -2,7 +2,7 @@
 
 ![model-router: Haiku, Sonnet and Opus lanes with a router in front](docs/banner.jpg)
 
-Cut your [Claude Code](https://claude.com/claude-code) costs and usage by sending each prompt to the **cheapest model that can handle it**. Before your prompt is answered, Claude Haiku reads it on low effort and picks haiku, sonnet or opus plus an effort level. Trivial questions go to Haiku. Hard architecture work goes to Opus.
+Designed to reduce your [Claude Code](https://claude.com/claude-code) costs and usage by sending each prompt to the **cheapest model that can handle it**. Before your prompt is answered, Claude Haiku reads it on low effort and picks haiku, sonnet or opus plus an effort level. Trivial questions go to Haiku. Hard architecture work goes to Opus.
 
 ![Demo: a real Claude Code session started on Opus. The status line shows each prompt routed to haiku, sonnet or opus, and /router shows the tally.](docs/demo.gif)
 
@@ -40,7 +40,7 @@ Answer `y` to add the marketplace, then pick a scope. *User* scope enables the p
 
 **Claude desktop app:** the Code tab can't run `/plugin`, but it loads plugins installed at User scope. Install with either command above from a terminal, then start a new Code session and type `/router` to check it's on.
 
-Requirements: Claude Code 2.1.275 or later for the plugin, and Python 3.8+ for the CLI. The plugin uses your normal Claude Code login, so it works on a Pro/Max subscription (saving usage limits) or with an API key (saving money).
+Requirements: Claude Code 2.1.275 or later for the plugin, and Python 3.8+ for the CLI. The plugin uses your normal Claude Code login, so it works on a Pro/Max subscription (where it aims to stretch usage limits) or with an API key (where it aims to save money).
 
 ## The plugin
 
@@ -73,7 +73,7 @@ Next prompt → back to ①, fresh decision
 **① Classifying (`prompt.submit`).** This runs before your message enters the conversation.
 - The plugin sends Haiku a short router prompt describing the three tiers: Haiku for trivial things, Sonnet for everyday coding, Opus for hard or high-stakes work.
 - Haiku also gets the last few messages, so a follow-up like "yes, do it" is judged by the task it refers to.
-- It's a separate one-off call (`$.model.complete`) with a 20-second timeout and a 300-token answer cap. It has no tools and no history, and nothing from it goes into your conversation.
+- It's a separate one-off call (`$.model.complete`) that typically takes 1–3 seconds, with a 20-second timeout and a 300-token answer cap. It has no tools and no history, and nothing from it goes into your conversation.
 - Haiku replies with JSON, which the plugin checks before using. Anything invalid means "no route", and the turn uses your session's normal model.
 - The decision appears in the status line, for example `router → sonnet · medium`.
 
@@ -87,7 +87,28 @@ Next prompt → back to ①, fresh decision
 
 **④ `/router` (`command.run`).** `on` and `off` turn routing on and off. `status` shows the last decision with Haiku's reason and how many prompts went to each model this session.
 
-**Where the savings come from:** the model doing the work in that turn is what you pay for. Each Haiku check costs about $0.0003. If it sends a quick question to Haiku instead of Opus, that answer costs a small fraction of what it would have, and effort set to `low` cuts thinking tokens further. See [Benefits and drawbacks](#benefits-and-drawbacks) for when a switch gets expensive.
+**Where the savings are meant to come from:** the model doing the work in that turn is what you pay for. Each Haiku check costs about $0.0002 (see [Cost of a classification](#cost-of-a-classification)). If it sends a quick question to Haiku instead of Opus, that answer usually costs a small fraction of what it would have, and effort set to `low` cuts thinking tokens further. See [Benefits and drawbacks](#benefits-and-drawbacks) for when a switch gets expensive, including long sessions where Haiku can cost more than staying on Opus.
+
+### Cost of a classification
+
+One classification is one Haiku 5.5 call at low effort. What it sends, from `classify()` in [`register.ts`](plugin/hooks/register.ts):
+
+| Part | Size | Tokens (estimated at ~4 characters per token) |
+|---|---|---|
+| `SYSTEM` router prompt | 1,438 characters | ~360 |
+| Conversation tail: last 4 messages, each cut to 600 characters | up to 2,400 characters | 0–600 |
+| Your new message, cut to 8,000 characters, plus the wrapper tags | usually a sentence or two | ~50–100 typical, ~2,000 max |
+| **Input total** | | **~1,000 typical mid-session**, ~3,000 max |
+| Output: the JSON decision plus any low-effort thinking, capped by `maxTokens: 300` | | **~150 typical**, 300 max |
+
+At Haiku 5.5 prices (prompts up to 100K tokens: $0.10 per million input tokens, $0.50 per million output tokens):
+
+```
+typical:  1,000 × $0.10/M + 150 × $0.50/M = $0.00010 + $0.000075 ≈ $0.0002
+maximum:  3,000 × $0.10/M + 300 × $0.50/M = $0.00030 + $0.00015  ≈ $0.00045
+```
+
+So a classification costs **about $0.0002**, or roughly $0.02 per 100 prompts. The token counts are estimates, not measurements. `evals/routing_eval.py` prints the measured per-call cost reported by Claude Code if you want to check it.
 
 ### Commands
 
@@ -117,7 +138,7 @@ echo "prompt" | route -p       # prompt from stdin
 
 How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
 
-To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0003.
+To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
 
 ## Tuning
 
@@ -128,33 +149,64 @@ To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permi
 
 ### Benefits
 
-- **Big savings on easy prompts.** Haiku costs a small fraction of Opus per token: $0.10 vs $4 per million input tokens, and $0.50 vs $20 per million output tokens. Quick questions, renames, one-liners and small edits make up a lot of a typical session, and they get answered for a fraction of a cent.
+- **Designed for savings on easy prompts.** On prompts up to 100K tokens, Haiku costs a small fraction of Opus per token: $0.10 vs $4 per million input tokens, and $0.50 vs $20 per million output tokens. (Above 100K tokens, Haiku's prices go up 5×; see the drawbacks.) Quick questions, renames, one-liners and small edits make up a lot of a typical session, and they can be answered for a fraction of a cent.
 - **Effort is routed too.** Even when a prompt needs a strong model, a simple one runs at `low` or `medium` effort instead of `xhigh`, which cuts thinking tokens. Changing effort never costs cache.
 - **The context stays the same.** Only the model and effort on each request change. Whichever model answers sees the full conversation, CLAUDE.md, memory, tool results and file contents. Every current model has a 1M-token context window, so nothing gets cut off.
-- **Routing is cheap and fails safe.** Each classification costs about $0.0003 and runs as a separate call that adds nothing to your conversation. If it fails or times out, the turn runs on the session's normal model.
+- **Routing is cheap and fails safe.** Each classification costs about $0.0002 and runs as a separate call that adds nothing to your conversation. If it fails or times out, the turn runs on the session's normal model.
 - **Hard work still gets Opus.** The router leans toward the cheaper tier only when two tiers are close. High-stakes work (production data, security, irreversible actions) is pushed up, not down.
-- **It works on subscriptions.** On Pro/Max, cheaper models use up less of your usage limits, so you hit them later.
+- **It works on subscriptions.** On Pro/Max, cheaper models use up less of your usage limits, so the aim is that you hit them later.
+
+These are design goals. There's no real-world usage data yet showing how much it saves in practice.
 
 ### Drawbacks
 
-- **Switching models can cost cache.** Prompt caches are per model. The first request on a model that hasn't seen the conversation re-reads it at full input price instead of the ~90% cheaper cached price. How much that matters depends on where you switch:
+- **Switching models can cost cache.** Prompt caches are per model. The first request on a model that hasn't seen the conversation writes it to that model's cache at above full input price, instead of reading it at the 90–95% cheaper cached price. How much that matters depends on where you switch and how long the conversation is. Haiku 5.5 is also priced by prompt length: a request over 100K input tokens (cache reads and writes included) pays 5× Haiku's normal rates. Opus and Sonnet 5.5 have no such step.
 
-  | Switch (100K-token conversation, ~2K output) | First step | Later steps | Worth it? |
-  |---|---|---|---|
-  | Stay on Opus (cached) | ~$0.06 | ~$0.06 | n/a |
-  | Opus → **Haiku** (from scratch) | ~$0.015 | ~$0.01 | **Yes, always.** Haiku's full price is below Opus's cached price. |
-  | Opus → **Sonnet** (from scratch) | ~$0.27 | ~$0.04 | **Usually not** in long sessions. It only pays off after ~10+ steps on Sonnet. |
+  Per request, assuming ~2K output tokens on either model and 5-minute cache writes:
+
+  | Switch | Context | First step | Later steps | Worth it? |
+  |---|---|---|---|---|
+  | Stay on Opus (cached) | 20K | ~$0.044 | ~$0.044 | n/a |
+  | Opus → **Haiku** (from scratch) | 20K | ~$0.0035 | ~$0.0012 | **Yes.** Even the first step is ~12× cheaper. |
+  | Stay on Opus (cached) | 100K | ~$0.06 | ~$0.06 | n/a |
+  | Opus → **Sonnet** (from scratch) | 100K | ~$0.27 | ~$0.03 | **Usually not** in long sessions. It only pays off after ~7+ steps on Sonnet. |
+  | Stay on Opus (cached) | 150K | ~$0.07 | ~$0.07 | n/a |
+  | Opus → **Haiku** (from scratch) | 150K | ~$0.099 | ~$0.0125 | **Only if the turn runs more than one step.** The first step costs ~40% more than staying on Opus; the second step earns it back. |
+
+  How these are worked out (prices per million tokens): Opus cached step = context × $0.20 + 2K × $20. Haiku first step = context × $0.125 (cache write) + 2K × $0.50 up to 100K tokens, or context × $0.625 + 2K × $2.50 over 100K. Haiku later steps use the cache-read price ($0.01, or $0.05 over 100K). Sonnet first step = context × $2.50 + 2K × $10, later steps context × $0.10 + 2K × $10.
+
+  **Where the Haiku crossover is:** with ~2K output, a first Haiku step is cheaper than a cached Opus step at any context up to 100K tokens, and more expensive just past it (~$0.068 vs ~$0.060 just over 100K). Longer answers move the crossover up, because Opus output costs 8× Haiku's long-context output: at ~5K output tokens it sits around 205K tokens of context. With 1-hour cache writes ($1 per million on Haiku over 100K), the first Haiku step costs more again.
 
   Two things soften this. Caches survive switching: each model keeps its own for a few minutes (up to an hour in some setups), so hopping back to Opus soon afterwards is cheap. And early in a session the context is small, so switching is nearly free. The bad case is a **long conversation that drops from Opus to Sonnet for a turn or two**. If a long session keeps hopping between models, run `/router off`.
 - **Hidden reasoning doesn't carry over.** On current models, a model's private reasoning ("thinking") from earlier turns can only be read by that same model. After a switch, the new model sees everything the previous one *said and did*, but not how it reasoned. That rarely matters, because conclusions end up in the visible text, but it can in long, delicate debugging sessions.
-- **Haiku can misjudge a prompt.** A hard problem phrased simply can get routed too low, and the answer may be weaker. Check `/router status` to see the reasoning, re-ask with more detail, or run `/router off` for that stretch of work. It also adds about 1–3 seconds of latency per prompt.
+- **Haiku can misjudge a prompt.** A hard problem phrased simply can get routed too low, and the answer may be weaker. Check `/router status` to see the reasoning, re-ask with more detail, or run `/router off` for that stretch of work. It also adds latency to every prompt: typically 1–3 seconds, with a 20-second timeout.
 - **It overrides your `/model` and `/effort` choices** while it's on. `/router off` hands control back.
 - **Savings depend on your mix.** If most of your prompts really are hard, they go to Opus anyway and you pay the small routing overhead for nothing.
 - **Subagents aren't routed.** They keep their own configured models and effort.
 - **The plugin API is early access.** The `turn.step` / `prompt.submit` hooks may change between Claude Code releases, and model IDs in `register.ts` need updating when new models ship.
 - **The CLI routes only once.** `route` picks a model for the whole session based on its first prompt. Use the plugin for per-prompt routing.
 
-Prices are Anthropic API list prices as of October 2026. Cached reads are billed at ~0.1× input price, and cache writes at 1.25×–2× depending on TTL. On a subscription, usage limits follow roughly the same proportions.
+Prices are Anthropic API list prices from the [pricing page](https://platform.claude.com/docs/en/about-claude/pricing), as of 2026-10 (checked 2026-10-14). Per million tokens:
+
+| Model | Input | 5m cache write | 1h cache write | Cache read | Output |
+|---|---|---|---|---|---|
+| Opus 5.5 | $4 | $5 | $8 | $0.20 | $20 |
+| Sonnet 5.5 | $2 | $2.50 | $4 | $0.10 | $10 |
+| Haiku 5.5, prompts up to 100K tokens | $0.10 | $0.125 | $0.20 | $0.01 | $0.50 |
+| Haiku 5.5, prompts over 100K tokens | $0.50 | $0.625 | $1 | $0.05 | $2.50 |
+
+Cached reads are billed at 0.05× input price on Opus and Sonnet 5.5 and 0.1× on Haiku 5.5, and cache writes at 1.25×–2× depending on TTL. On a subscription, usage limits follow roughly the same proportions.
+
+## Alternatives
+
+Claude Code already has ways to mix models, and other people have built routers too:
+
+- **[`opusplan`](https://code.claude.com/docs/en/model-config)** is a built-in model setting (`/model opusplan`) that uses Opus in plan mode and switches to Sonnet for execution. The switch happens at the plan boundary, not per prompt.
+- **[The advisor](https://code.claude.com/docs/en/advisor)** (experimental, Anthropic API only) pairs your main model with a stronger advisor model, set with `/advisor`, `advisorModel` or `--advisor`. Claude decides when to consult it mid-task, for example before committing to an approach. Your main model stays the same.
+- **[Subagent model pinning](https://code.claude.com/docs/en/sub-agents)**: set `model:` (and optionally `effort:`) in a subagent's frontmatter, so delegated work like code review runs on a cheaper or stronger model. Only that subagent's work is affected.
+- **Other routers.** [claude-model-router-hook](https://github.com/tzachbon/claude-model-router-hook) classifies prompts with local heuristics (with an optional Claude fallback), warns by default, can opt in to switching the model for *new* sessions, and routes subagent spawns. [Claude Code Router](https://github.com/musistudio/claude-code-router) is a local gateway that sits between Claude Code and the API and routes requests across providers and models.
+
+How this project differs: it switches the **main session's** model and effort **in place, on every prompt**, using a Haiku call to decide. That's finer-grained than `opusplan` and needs no plan mode, but it also pays the cache and latency costs described above. These approaches can be combined, for example subagents pinned to their own models while the router handles the main thread.
 
 ## Layout
 
@@ -195,16 +247,18 @@ python3 evals/routing_eval.py   # ~100 real Haiku classifications, ~$0.02
 python3 evals/e2e.py            # real plugin in real sessions; checks which model answered
 ```
 
-- **`evals/routing_eval.py`** runs the plugin's actual router prompt (read from `register.ts`) on 33 labelled prompts in [`evals/cases.jsonl`](evals/cases.jsonl): 10 easy, 10 everyday coding, 10 hard, and 3 follow-ups with conversation context. Each runs 3 times to check consistency. It reports correct-tier rate, **under-routing** (too cheap, so a risk of weak answers) and **over-routing** (too expensive, so wasted money). Some borderline cases accept two tiers.
+- **`evals/routing_eval.py`** runs the plugin's actual router prompt (read from `register.ts`) on 33 labelled prompts in [`evals/cases.jsonl`](evals/cases.jsonl): 10 easy, 10 everyday coding, 10 hard, and 3 follow-ups with conversation context. Each runs 3 times to check consistency. It reports correct-tier rate, **under-routing** (too cheap, so a risk of weak answers) and **over-routing** (too expensive, so wasted money). 10 of the 33 cases are borderline and accept either of two tiers.
+
+What this measures: how often Haiku agrees with labels I wrote myself, and whether it agrees consistently across runs. It's a routing-consistency check. It doesn't measure answer quality, and 33 hand-labelled prompts are a small sample.
 - **`evals/e2e.py`** starts headless Claude Code sessions on `--model opus` with the plugin loaded, sends real prompts, and checks from the session's usage report which model actually answered.
 
 Latest results (Claude Code 2.1.296, Haiku 5.5, October 2026):
 
 | Eval | Result |
 |---|---|
-| Routing quality | **96/99 (97%)** correct tier; **0 over-routed**; 3 under-routed, all one borderline case (a SQL "top 3 orders per customer" query sent to Haiku) |
+| Routing agreement (33 self-labelled prompts × 3 runs; 10 accept two tiers) | **96/99 (97%)** matched the label; **0 over-routed**; 3 under-routed, all one borderline case (a SQL "top 3 orders per customer" query sent to Haiku) |
 | Follow-ups ("yes, do it" after an Opus plan) | Stays on Opus 6/6, after the follow-up rule was tightened. Before that, it dropped to Sonnet 1/3 of the time. |
-| Cost per classification | ~$0.00017 |
+| Cost per classification | ~$0.0002 (see [Cost of a classification](#cost-of-a-classification)) |
 | End-to-end (6 prompts, sessions started on Opus) | **6/6** answered by the expected model: Haiku for both easy prompts, Sonnet for both coding prompts, Opus for both hard ones. Cost $0.01–0.05 per prompt, including the answer. |
 
 To tune the router, change `SYSTEM` in `register.ts`, rerun `routing_eval.py`, and compare. Add your own prompts to `cases.jsonl` so the eval matches how you actually work.
