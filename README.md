@@ -197,6 +197,43 @@ Prices are Anthropic API list prices from the [pricing page](https://platform.cl
 
 Cached reads are billed at 0.05× input price on Opus and Sonnet 5.5 and 0.1× on Haiku 5.5, and cache writes at 1.25×–2× depending on TTL. On a subscription, usage limits follow roughly the same proportions.
 
+## Measure it yourself
+
+Routing only pays if the cheaper turns save more than the classifier and the cache re-writes cost. The plugin keeps a small routing log so you can check this on your own sessions.
+
+**In a session:** `/router stats` summarises the routing log: prompts by route and origin, mid-turn prompts, classifier outcomes and latency, classifier overhead, and overrides. It uses only the plugin's own log, so it has no token or cost figures for the turns themselves.
+
+**Full report:** `scripts/router_report.py` (Python 3.9+, stdlib only) joins the routing log with Claude Code's session transcripts (`~/.claude/projects/<project>/<session>.jsonl`, with subagents under `<session>/subagents/`):
+
+```sh
+python3 scripts/router_report.py --since 2026-10-01 --until 2026-10-31
+#   --projects-dir DIR   transcripts root (default ~/.claude/projects)
+#   --log PATH           routing log: the plugin's store file or a /router export (repeatable)
+#   --all-sessions       also count sessions with no routing-log records
+#   --json               machine-readable figures
+```
+
+It prints:
+
+- the share of prompts by route (from the log), and of API requests and tokens by model (from the transcripts);
+- the actual cost at API list prices, labelled **API-equivalent**;
+- an **Opus-only counterfactual**, with the same tokens priced at Opus;
+- **net savings**, with the switch cache penalty and the classifier overhead on separate lines;
+- the **override rate**: `/model` changes and `/router off` per user prompt.
+
+By default the report reads the log straight from the plugin's store file (`~/.claude/plugins/store/model-router_*.json`). If that file isn't there, for example because `CLAUDE_CONFIG_DIR` moved it or you're on another machine, run `/router export [path]`. It writes the log as JSON Lines, to `~/.claude/model-router/routing-log.jsonl` by default, and the report picks it up or you can pass it with `--log`. With no routing log, the report still gives token and cost shares for every session, but those shares include models you picked by hand.
+
+Prices live in one file, `plugin/hooks/prices.json`, with the source URL and the date they were checked. Models missing from it, and fast-mode requests, are listed as **unpriced** and left out of the cost lines. They are never counted as $0.
+
+**What is stored.** One record per prompt: the time, the session ID, the route (tier and effort, or `session` when nothing was routed), the classifier's latency, outcome (ok / failed / timeout / skipped) and token usage, the prompt's origin (user, slash command or other, plus the raw origin kind such as `scheduled-trigger`), and whether it arrived mid-turn. Overrides are logged too: `/router off`, `/router on` and manual `/model` changes. **No prompt text is ever stored**, and the report never reads or prints message content. The log keeps the newest 4,000 records, about 1 MB.
+
+**Limits of the counterfactual.**
+
+- It assumes Opus would have used the same tokens and written the same length of output. In practice Opus may write more or less, and take more or fewer tool calls.
+- It doesn't measure answer quality. The override rate is only a rough proxy: a cheap answer you quietly accepted, or re-asked without overriding, doesn't count.
+- Cache writes made right after a model switch are counted as cache reads in the counterfactual. This covers up to the size of the previous request's context, and only if the switch came within the cache's lifetime (5 minutes, or 1 hour for 1-hour writes). The rest of each write is treated as new content, which costs a write either way.
+- Costs are at API list prices. On Pro or Max you don't pay per token, so treat the figures as API-equivalent: a measure of how much usage routing saves, not dollars billed.
+
 ## Alternatives
 
 Claude Code already has ways to mix models, and other people have built routers too:

@@ -1,14 +1,18 @@
-.PHONY: test test-cli test-plugin test-installer release-checksums
+.PHONY: test test-cli test-plugin test-scripts test-installer release-checksums
 
 SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo shasum -a 256)
 # The ref and checksum pinned in install.sh.
 INSTALL_REF := $(shell sed -n 's/^MR_REF="\(.*\)"$$/\1/p' install.sh)
 INSTALL_SHA := $(shell sed -n 's/^MR_ROUTE_PY_SHA256="\(.*\)"$$/\1/p' install.sh)
 
-test: test-cli test-plugin test-installer
+test: test-cli test-plugin test-scripts test-installer
 
 test-cli:
 	python3 -m unittest discover -s cli/tests -v
+
+# scripts/router_report.py against synthetic transcripts. Stdlib only.
+test-scripts:
+	python3 -m unittest discover -s scripts/tests -v
 
 # Needs the `claude` CLI (Claude Code 2.1.275+). Runs against the engine; no API
 # calls and no login needed.

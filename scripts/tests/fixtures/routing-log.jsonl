@@ -1,0 +1,10 @@
+{"v": 1, "kind": "prompt", "ts": "2026-10-01T10:00:00.000Z", "session": "sess-a", "tier": "opus", "effort": "high", "latencyMs": 800, "outcome": "ok", "origin": "user", "originKind": "composer", "midTurn": false, "usage": {"in": 1000, "out": 30, "cr": 0, "cw": 0}}
+{"v": 1, "kind": "prompt", "ts": "2026-10-01T10:01:00.000Z", "session": "sess-a", "tier": "haiku", "effort": "low", "latencyMs": 700, "outcome": "ok", "origin": "user", "originKind": "composer", "midTurn": false, "usage": {"in": 900, "out": 20, "cr": 0, "cw": 0}}
+{"v": 1, "kind": "prompt", "ts": "2026-10-01T10:02:30.000Z", "session": "sess-a", "tier": "session", "effort": "session", "latencyMs": null, "outcome": "skipped", "skip": "non-user", "origin": "other", "originKind": "scheduled-trigger", "midTurn": false}
+{"v": 1, "kind": "override", "ts": "2026-10-01T10:02:50.000Z", "session": "sess-a", "action": "model", "from": "claude-haiku-5-5", "to": "claude-opus-5-5", "source": "command"}
+{"v": 1, "kind": "prompt", "ts": "2026-10-01T10:03:00.000Z", "session": "sess-a", "tier": "session", "effort": "session", "latencyMs": null, "outcome": "skipped", "skip": "slash", "origin": "slash", "originKind": "composer", "midTurn": true}
+{"v": 1, "kind": "prompt", "ts": "2026-10-01T11:00:00.000Z", "session": "sess-b", "tier": "session", "effort": "session", "latencyMs": 20000, "outcome": "timeout", "origin": "user", "originKind": "composer", "midTurn": false}
+{"v": 1, "kind": "override", "ts": "2026-10-01T11:05:00.000Z", "session": "sess-b", "action": "router-off"}
+{"v": 1, "kind": "override", "ts": "2026-10-01T11:06:00.000Z", "session": "sess-b", "action": "router-on"}
+{"v": 1, "kind": "prompt", "ts": "2026-09-01T09:00:00.000Z", "session": "sess-old", "tier": "opus", "effort": "high", "latencyMs": 500, "outcome": "ok", "origin": "user", "originKind": "composer", "midTurn": false, "usage": {"in": 1000, "out": 30, "cr": 0, "cw": 0}}
+{broken
