@@ -73,7 +73,11 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     route = undefined
     if (enabled && isUserPrompt(e.origin) && e.text.trim() && !e.text.trimStart().startsWith('/')) {
-      route = await classify($, e.text)
+      try {
+        route = await classify($, e.text)
+      } catch {
+        route = undefined // a classifier error must never block the prompt
+      }
       if (route) {
         counts[route.model] += 1
         $.ui.status(`router → ${route.model} · ${route.effort}`)

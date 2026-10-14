@@ -235,6 +235,22 @@ describe('fails safe', () => {
     expect(sent[0]?.model).toBe(STEP.model)
   })
 
+  for (const [kind, fail] of [
+    ['synchronously', () => { throw new Error('classifier blew up') }],
+    ['asynchronously', () => Promise.reject(new Error('classifier blew up'))],
+  ] as const) {
+    test(`a classifier that throws ${kind} never blocks the prompt`, async ($, on) => {
+      const statuses = world(on, fail as () => never)
+      const sent = captureStep(on)
+      await start($)
+      const r = await submit($, 'hello there')
+      expect(r).toEqual({ text: 'hello there' })
+      await step($)
+      expect(sent).toEqual([{ model: STEP.model, effort: STEP.effort }])
+      expect(statuses).toEqual(['router → session model (classifier failed)'])
+    })
+  }
+
   test('does not route subagent requests', async ($, on) => {
     world(on, '{"model":"haiku","effort":"low","reason":"x"}')
     const sent = captureStep(on)
