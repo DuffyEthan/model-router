@@ -1,0 +1,32 @@
+{"id":"ho1","prompt":"what port does the dev server run on in this repo?","expect":["haiku"]}
+{"id":"ho2","prompt":"rename getUserData to fetchUserProfile everywhere it's used","expect":["haiku","sonnet"]}
+{"id":"ho3","prompt":"yes do it","expect":["haiku","sonnet"]}
+{"id":"ho4","prompt":"now the same for the orders table","expect":["haiku","sonnet"]}
+{"id":"ho5","prompt":"test_parse_dates is failing after I bumped pandas, can you fix it","expect":["sonnet"]}
+{"id":"ho6","prompt":"add a --verbose flag to the CLI that prints each request it makes","expect":["sonnet"]}
+{"id":"ho7","prompt":"Should we move from REST polling to websockets for the live dashboard, or is server-sent events enough? We have about 2k concurrent users and a single Postgres instance.","expect":["sonnet","opus"]}
+{"id":"ho8","prompt":"split the 1500-line utils.py into sensible modules and update all the imports","expect":["sonnet","opus"]}
+{"id":"ho9","prompt":"why is this slow","expect":["sonnet"]}
+{"id":"ho10","prompt":"fix the typo in the README heading","expect":["haiku"]}
+{"id":"ho11","prompt":"We get intermittent deadlocks in production between the billing worker and the webhook handler, maybe once a day. Logs attached below. Figure out the lock ordering issue and propose a fix.","expect":["opus"]}
+{"id":"ho12","prompt":"write a unit test for the slugify function","expect":["haiku","sonnet"]}
+{"id":"ho13","prompt":"what's the difference between useMemo and useCallback","expect":["haiku"]}
+{"id":"ho14","prompt":"migrate the whole app from Redux to Zustand","expect":["sonnet","opus"]}
+{"id":"ho15","prompt":"can you explain what this regex does: ^(?=.*\\d)(?=.*[a-z]).{8,}$","expect":["haiku"]}
+{"id":"ho16","prompt":"the build fails on CI but passes locally, here's the log. it's something about a missing env var I think","expect":["sonnet"]}
+{"id":"ho17","prompt":"ok go ahead with option 2","expect":["sonnet"]}
+{"id":"ho18","prompt":"Design the data model and sync protocol for offline-first editing in our mobile app, including conflict resolution when two devices edit the same note. Consider CRDTs vs last-write-wins.","expect":["opus"]}
+{"id":"ho19","prompt":"bump the version to 1.4.2 in package.json","expect":["haiku"]}
+{"id":"ho20","prompt":"add type hints to every function in services/payments.py","expect":["haiku","sonnet"]}
+{"id":"ho21","prompt":"review this PR diff for security issues before I merge it","expect":["sonnet","opus"]}
+{"id":"ho22","prompt":"thanks, that worked","expect":["haiku"]}
+{"id":"ho23","prompt":"there's a memory leak somewhere in the image processing pipeline, RSS grows about 50MB per hour. find it","expect":["sonnet","opus"]}
+{"id":"ho24","prompt":"convert this callback-based function to async/await","expect":["haiku","sonnet"]}
+{"id":"ho25","prompt":"how should I structure auth across our three services so a user logs in once? Right now each one has its own session cookie.","expect":["sonnet","opus"]}
+{"id":"ho26","prompt":"delete the unused imports in this file","expect":["haiku"]}
+{"id":"ho27","prompt":"the same thing but for the Python client too, and add tests","expect":["sonnet"]}
+{"id":"ho28","prompt":"implement rate limiting on the public API endpoints using the existing Redis connection","expect":["sonnet"]}
+{"id":"ho29","prompt":"Our test suite takes 40 minutes. Profile it, figure out where the time goes, and restructure fixtures and parallelism to get it under 10.","expect":["sonnet","opus"]}
+{"id":"ho30","prompt":"which file defines the Order model?","expect":["haiku"]}
+{"id":"ho31","prompt":"hmm that didn't work, still getting the same error","expect":["sonnet"]}
+{"id":"ho32","prompt":"Prove that this lock-free queue implementation is linearizable, or find a counterexample interleaving.","expect":["opus"]}
