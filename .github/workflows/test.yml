@@ -5,15 +5,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The installer test checks install.sh's pinned checksum against the
+          # pinned ref, so it needs full history and tags.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: CLI unit tests
-        run: python -m unittest discover -s cli/tests -v
-      - name: Installer syntax
-        run: sh -n install.sh
+        run: make test-cli
+      - name: Installer (lint, pinned checksum, offline install tests)
+        run: make test-installer
       - name: Manifests are valid JSON
         run: |
           python -m json.tool .claude-plugin/marketplace.json > /dev/null
           python -m json.tool plugin/.claude-plugin/plugin.json > /dev/null
           python -m json.tool plugin/hooks/hooks.json > /dev/null
+
+  plugin:
+    runs-on: ubuntu-latest
+    env:
+      # Pinned Claude Code version. `plugin validate` / `plugin test` need
+      # 2.1.275+; they make no API calls and need no login or API key.
+      CLAUDE_CODE_VERSION: "2.1.296"
+      DISABLE_AUTOUPDATER: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Claude Code (pinned)
+        run: |
+          npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+          claude --version
+      - name: Plugin validate and tests
+        run: make test-plugin
