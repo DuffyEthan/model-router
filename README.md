@@ -138,6 +138,15 @@ A tested example, with sessions started with `--model opus`:
 
 In a small test, Haiku answered simple standalone questions as well as Sonnet did, so the default is fine for most people. The floor lets you opt out of Haiku answers anyway.
 
+### `/router background`
+
+`/router background session|sonnet|haiku` sets the tier for background notifications (`task-notification`, `peer`, etc.) and subagents. In long-running sessions started with `--model opus`, background tasks and subagents otherwise run on Opus at full price, consuming most of the session's tokens. Setting the background tier to `sonnet` (effort `medium`) or `haiku` (effort `low`) routes them to a cheaper model while keeping interactive prompts routed normally. The default is `session` (run on the session model). The setting is remembered across sessions.
+
+```
+/router background sonnet   # route background notifications and subagents to Sonnet
+/router background haiku    # route background notifications and subagents to Haiku
+```
+
 ## The `route` CLI
 
 ```bash
