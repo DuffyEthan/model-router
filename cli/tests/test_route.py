@@ -336,6 +336,14 @@ class FloorTests(unittest.TestCase):
         text = " ".join(out.getvalue().split())  # argparse wraps to the terminal width
         self.assertIn("--floor FLOOR never route below this model (haiku, sonnet, opus; default haiku)", text)
 
+    def test_help_mentions_sonnet_baseline(self):
+        with mock.patch.object(sys, "argv", ["route", "--help"]), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+             self.assertRaises(SystemExit):
+            route.main()
+        text = " ".join(out.getvalue().split())
+        self.assertIn("--model MODEL skip routing and force a model (haiku, sonnet, opus; sonnet recommended as baseline)", text)
+
 
 class LogTests(unittest.TestCase):
     def test_log_appends_jsonl_and_truncates_prompt(self):

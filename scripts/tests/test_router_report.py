@@ -101,6 +101,12 @@ class FixtureReport(unittest.TestCase):
         # 70829 - 35215.5 - 322.5 = 35291
         self.assertAlmostEqual(rep["net_savings_usd"], (A_CF + B_CF - A_ACTUAL - B_ACTUAL - CLASSIFIER) * U, places=12)
         self.assertAlmostEqual(rep["net_savings_usd"], 35291 * U, places=12)
+        # Sonnet counterfactual: (14429 + 56400) / 2 = 35414.5
+        self.assertAlmostEqual(rep["counterfactual_sonnet_usd"], 35414.5 * U, places=12)
+        # 35414.5 - 35215.5 - 322.5 = -123.5
+        self.assertAlmostEqual(rep["net_savings_vs_sonnet_usd"], -123.5 * U, places=12)
+        # Switch penalty (10783.25) is 30.6% of actual (35215.5) > 10%
+        self.assertTrue(rep["cache_health_warning"])
 
     def test_switches_alone_can_cost_more_than_opus(self):
         # Session A alone: Opus -> Haiku -> Opus re-wrote the cache twice. Actual
@@ -110,9 +116,39 @@ class FixtureReport(unittest.TestCase):
         rep = rr.build_report(reqs, [], PRICES)
         self.assertAlmostEqual(rep["actual_usd"], A_ACTUAL * U, places=12)
         self.assertAlmostEqual(rep["counterfactual_usd"], A_CF * U, places=12)
+        self.assertAlmostEqual(rep["counterfactual_sonnet_usd"], 7214.5 * U, places=12)
+        self.assertAlmostEqual(rep["net_savings_vs_sonnet_usd"], (7214.5 - A_ACTUAL) * U, places=12)
         self.assertLess(rep["net_savings_usd"], 0)
+        self.assertTrue(rep["cache_health_warning"])
         self.assertEqual(rep["by_model"]["claude-haiku-5-5"]["switch_requests"], 1)
         self.assertEqual(rep["by_model"]["claude-opus-5-5"]["switch_requests"], 1)
+
+    def test_cache_efficiency_health_check_warning(self):
+        rep, stats = run(since="2026-10-01", until="2026-10-01")
+        self.assertTrue(rep["cache_health_warning"])
+        text = rr.format_report(rep, stats, PRICES, "test")
+        self.assertIn("Cache Efficiency Health Check:", text)
+        self.assertIn("WARNING: Severe cache thrashing detected", text)
+        self.assertIn("Sonnet-first baseline", text)
+        self.assertIn("/router off", text)
+
+    def test_sonnet_baseline_in_report_output(self):
+        rep, stats = run(since="2026-10-01", until="2026-10-01")
+        text = rr.format_report(rep, stats, PRICES, "test")
+        self.assertIn("Counterfactual: Sonnet 5.5 only", text)
+        self.assertIn("Net savings vs Sonnet", text)
+
+    def test_cache_efficiency_health_check_ok_when_no_switches(self):
+        req = {"id": "x", "file": "f", "session": "s", "chain": "", "model": "claude-sonnet-5-5",
+               "ts": rr.parse_ts("2026-10-01T00:00:00Z"), "geo": None, "speed": "standard",
+               "tokens": {"input": 1000, "cw5m": 0, "cw1h": 0, "cache_read": 10000, "output": 100}}
+        rep = rr.build_report([req], [], PRICES)
+        self.assertEqual(rep["switch_penalty_usd"], 0)
+        self.assertFalse(rep["cache_health_warning"])
+        text = rr.format_report(rep, defaultdict(int), PRICES, "clean")
+        self.assertIn("Cache Efficiency Health Check:", text)
+        self.assertIn("OK: Switch cache penalty", text)
+        self.assertNotIn("WARNING", text)
 
     def test_long_context_haiku_is_priced_per_request(self):
         r = {"input": 1000, "cw5m": 0, "cw1h": 1000, "cache_read": 99000, "output": 200}

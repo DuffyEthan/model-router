@@ -10,8 +10,10 @@ Joins the model-router plugin's routing log with Claude Code's session transcrip
   * an Opus-only counterfactual: the same tokens priced at Opus, with the cache writes
     caused by a model switch counted as cache reads (staying on Opus would have hit the
     cache);
+  * a Sonnet-baseline comparison: comparing actual spend against a pure Sonnet counterfactual;
   * net savings, with the switch cache penalty and the classifier overhead on lines of
     their own;
+  * a Cache Efficiency Health Check warning if cache thrashing is high;
   * the override rate (/model changes and /router off per user prompt), a rough quality
     proxy only.
 
@@ -346,10 +348,11 @@ def build_report(
         scope = "sessions in the routing log"
 
     cf_model = prices["counterfactual_model"]
+    cf_sonnet_model = prices.get("counterfactual_sonnet_model", "claude-sonnet-5-5")
     us_mult = prices.get("us_inference_multiplier", 1.0)
     by_model: Dict[str, Dict[str, Any]] = {}
     unpriced: Dict[str, Dict[str, Any]] = {}
-    actual = counterfactual = penalty = 0.0
+    actual = counterfactual = counterfactual_sonnet = penalty = 0.0
 
     for r in reqs:
         t = r["tokens"]
@@ -383,6 +386,10 @@ def build_report(
             cf["cache_read"] = t["cache_read"] + s
         cf_rates = rate_card(prices, cf_model, prompt_tokens)
         counterfactual += price_tokens(cf_rates, cf, mult)
+
+        cf_sonnet_rates = rate_card(prices, cf_sonnet_model, prompt_tokens)
+        if cf_sonnet_rates is not None:
+            counterfactual_sonnet += price_tokens(cf_sonnet_rates, cf, mult)
 
         row = by_model.setdefault(name, {"requests": 0, "tokens": empty_bundle(), "cost": 0.0, "switch_requests": 0})
         row["requests"] += 1
@@ -421,6 +428,12 @@ def build_report(
 
     priced_requests = sum(m["requests"] for m in by_model.values())
     priced_tokens = sum(total(m["tokens"]) for m in by_model.values())
+    clf_cost_usd = clf_cost if with_usage else 0.0
+    net_savings = counterfactual - actual - clf_cost_usd
+    net_savings_sonnet = counterfactual_sonnet - actual - clf_cost_usd
+    cache_health_warning = penalty > 0 and (
+        penalty > net_savings or (actual > 0 and penalty > 0.10 * actual)
+    )
     return {
         "scope": scope,
         "requests": len(reqs),
@@ -434,7 +447,10 @@ def build_report(
         "classifier_usd": clf_cost if with_usage else None,
         "classifier_estimated": clf_estimated,
         "counterfactual_usd": counterfactual,
-        "net_savings_usd": counterfactual - actual - (clf_cost if with_usage else 0.0),
+        "net_savings_usd": net_savings,
+        "counterfactual_sonnet_usd": counterfactual_sonnet,
+        "net_savings_vs_sonnet_usd": net_savings_sonnet,
+        "cache_health_warning": cache_health_warning,
         "prompts": len(prompts),
         "prompt_tiers": dict(tier_counts),
         "prompt_origins": dict(origin_counts),
@@ -453,7 +469,12 @@ def _pct(n: float, d: float) -> str:
 
 
 def _usd(x: Optional[float]) -> str:
-    return "unknown" if x is None else f"${x:,.4f}"
+    if x is None:
+        return "unknown"
+    s = f"{abs(x):,.4f}"
+    if s == "0.0000":
+        return "$0.0000"
+    return f"-${s}" if x < 0 else f"${s}"
 
 
 def format_report(rep: Dict[str, Any], stats: Dict[str, int], prices: Dict[str, Any], label: str) -> str:
@@ -511,14 +532,19 @@ def format_report(rep: Dict[str, Any], stats: Dict[str, int], prices: Dict[str, 
 
     L.append("Cost at API list prices (API-equivalent: Pro/Max plans do not pay per token):")
     cf_label = prices["models"][prices["counterfactual_model"]]["label"]
+    cf_sonnet_model = prices.get("counterfactual_sonnet_model", "claude-sonnet-5-5")
+    cf_sonnet_label = prices["models"].get(cf_sonnet_model, {}).get("label", "Sonnet 5.5")
     est = " (partly estimated)" if rep["classifier_estimated"] else ""
     net = rep["net_savings_usd"]
+    net_sonnet = rep.get("net_savings_vs_sonnet_usd", 0.0)
     rows = [
         ("Actual", _usd(rep["actual_usd"]), ""),
         ("  of which switch cache penalty", _usd(rep["switch_penalty_usd"]), ""),
         (f"Classifier overhead ({rep['classifier_calls']} calls)", _usd(rep["classifier_usd"]), est),
         (f"Counterfactual: {cf_label} only", _usd(rep["counterfactual_usd"]), ""),
-        ("Net savings", _usd(net), f"  ({_pct(net, rep['counterfactual_usd']).strip()} of counterfactual)"),
+        ("Net savings (vs Opus)", _usd(net), f"  ({_pct(net, rep['counterfactual_usd']).strip()} of Opus counterfactual)"),
+        (f"Counterfactual: {cf_sonnet_label} only", _usd(rep["counterfactual_sonnet_usd"]), ""),
+        ("Net savings vs Sonnet", _usd(net_sonnet), f"  ({_pct(net_sonnet, rep['counterfactual_sonnet_usd']).strip()} of Sonnet counterfactual)"),
     ]
     for name, value, note in rows:
         L.append(f"  {name:<36}{value:>14}{note}")
@@ -526,6 +552,26 @@ def format_report(rep: Dict[str, Any], stats: Dict[str, int], prices: Dict[str, 
     if rep["classifier_usd"] is None and rep["classifier_calls"]:
         L.append("  (classifier overhead unknown: the log has no usage for its calls; net savings exclude it)")
     L.append("")
+
+    if rep["priced_requests"] > 0:
+        L.append("Cache Efficiency Health Check:")
+        if rep.get("cache_health_warning"):
+            pct_actual = (rep["switch_penalty_usd"] / rep["actual_usd"] * 100) if rep["actual_usd"] else 0.0
+            reasons = []
+            if rep["switch_penalty_usd"] > rep["net_savings_usd"]:
+                reasons.append(f"switch penalty ({_usd(rep['switch_penalty_usd'])}) exceeds net savings ({_usd(rep['net_savings_usd'])})")
+            if rep["actual_usd"] > 0 and rep["switch_penalty_usd"] > 0.10 * rep["actual_usd"]:
+                reasons.append(f"switch penalty is {pct_actual:.1f}% of actual spend (> 10%)")
+            reason_str = " and ".join(reasons)
+            L.append(f"  WARNING: Severe cache thrashing detected ({reason_str})!")
+            L.append("  Frequent model switches re-write the prompt cache instead of reading warm context.")
+            L.append("  Recommendations:")
+            L.append("    * Use a Sonnet-first baseline (`claude --model sonnet`) so everyday work stays warm on Sonnet,")
+            L.append("      escalating to Opus only when hard multi-step reasoning is needed.")
+            L.append("    * Use `/router off` in long, deep sessions to avoid cache penalty churn.")
+        else:
+            L.append(f"  OK: Switch cache penalty ({_usd(rep['switch_penalty_usd'])}) is within healthy limits.")
+        L.append("")
 
     if rep["prompts"]:
         rate = rep["override_rate"]
