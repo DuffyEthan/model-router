@@ -8,6 +8,7 @@ Usage:
     route "your prompt"            # classify, then open interactive Claude Code
     route -p "your prompt"         # classify, then run headless (print mode)
     route --dry-run "your prompt"  # only show the routing decision
+    route --model sonnet "prompt"  # force model (sonnet is recommended baseline)
     route --floor sonnet "prompt"  # never route below sonnet
     route "your prompt" -- --permission-mode plan   # flags after -- go to claude
     echo "prompt" | route -p       # prompt from stdin
@@ -120,7 +121,8 @@ def main() -> None:
     ap.add_argument("prompt", nargs="*", help="prompt text (or pipe via stdin)")
     ap.add_argument("-p", "--print", action="store_true", help="run headless and print the answer")
     ap.add_argument("--dry-run", action="store_true", help="only show the routing decision")
-    ap.add_argument("--model", help=f"skip routing and force a model ({', '.join(MODELS)})")
+    ap.add_argument("--model",
+                    help=f"skip routing and force a model ({', '.join(MODELS)}; sonnet recommended as baseline)")
     ap.add_argument("--effort", help=f"override the routed effort level ({', '.join(EFFORTS)})")
     ap.add_argument("--floor", default=DEFAULT_FLOOR,
                     help=f"never route below this model ({', '.join(MODELS)}; default {DEFAULT_FLOOR})")

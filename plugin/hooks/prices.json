@@ -28,5 +28,6 @@
     }
   },
   "counterfactual_model": "claude-opus-5-5",
+  "counterfactual_sonnet_model": "claude-sonnet-5-5",
   "classifier_model": "claude-haiku-5-5"
 }

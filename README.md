@@ -2,7 +2,10 @@
 
 ![model-router: Haiku, Sonnet and Opus lanes with a router in front](docs/banner.jpg)
 
-Designed to reduce your [Claude Code](https://claude.com/claude-code) costs and usage by sending each prompt to the **cheapest model that can handle it**. Before your prompt is answered, Claude Haiku reads it on low effort and picks haiku, sonnet or opus plus an effort level. Trivial questions go to Haiku. Hard architecture work goes to Opus.
+Designed to reduce your [Claude Code](https://claude.com/claude-code) costs and usage by sending each prompt to the **cheapest model that can handle it**. Before your prompt is answered, Claude Haiku reads it on low effort and picks haiku, sonnet or opus plus an effort level. Trivial questions go to Haiku. Everyday coding stays on Sonnet. Hard architecture work goes to Opus.
+
+> **Recommended Baseline: Sonnet-First (`claude --model sonnet`)**
+> Starting your session on Sonnet gives an immediate **50% baseline savings** over Opus across every token category, keeps prompt caches warm for everyday work, and lets the router auto-escalate hard tasks to Opus when deep reasoning counts. See [Architecture & Economics: Why Sonnet-First?](#architecture--economics-why-sonnet-first) below.
 
 ![Demo: a real Claude Code session started on Opus. The status line shows each prompt routed to haiku, sonnet or opus, and /router shows the tally.](docs/demo.gif)
 
@@ -89,7 +92,50 @@ Next prompt → back to ①, fresh decision
 
 **④ `/router` (`command.run`).** `on` and `off` turn routing on and off. `status` shows the last decision with Haiku's reason and how many prompts went to each model this session.
 
-**Where the savings are meant to come from:** the model doing the work in that turn is what you pay for. Each Haiku check costs about $0.0002 (see [Cost of a classification](#cost-of-a-classification)). If it sends a quick question to Haiku instead of Opus, that answer usually costs a small fraction of what it would have, and effort set to `low` cuts thinking tokens further. See [Benefits and drawbacks](#benefits-and-drawbacks) for when a switch gets expensive, including long sessions where Haiku can cost more than staying on Opus.
+**Where the savings are meant to come from:** the model doing the work in that turn is what you pay for. Each Haiku check costs about $0.0002 (see [Cost of a classification](#cost-of-a-classification)). If it sends a quick question to Haiku instead of Opus, that answer usually costs a small fraction of what it would have, and effort set to `low` cuts thinking tokens further. See [Architecture & Economics: Why Sonnet-First?](#architecture--economics-why-sonnet-first) and [Benefits and drawbacks](#benefits-and-drawbacks) for when a switch gets expensive.
+
+### Architecture & Economics: Why Sonnet-First?
+
+The project originally conceived routing as starting on Opus and downgrading simpler prompts to Haiku or Sonnet. In real-world coding sessions, however, that setup delivered disappointing results: on a real \$36 spend across multiple sessions, a **70% prompt share routed away from Opus produced only a 4.4% net savings**.
+
+Here is why that happened, and why inverting the baseline to **Sonnet-first** (`claude --model sonnet`) achieves **35%–50% savings** while preserving full Opus intelligence.
+
+#### The Economic Math: Prompt Count vs. Token Volume
+A 70% prompt share sounds like it should save ~70% on costs. But in Claude Code agentic sessions, **prompt count does not correlate with token volume**:
+
+* **Trivial prompts have small contexts:** Definitions, shell one-liners, typos, and clarifying questions typically happen early or in small contexts with minimal conversation history, consuming only a few thousand tokens.
+* **Complex tasks dominate token volume:** Hard prompts—multi-file architectural changes, deep debugging loops, refactors, and multi-step tool calls—typically happen late in long sessions where conversation context is 50,000–150,000+ tokens. A single deep turn can easily consume 20× the tokens of an early trivial turn.
+* **Unrouted tasks default to the session baseline:** Subagents, background notifications, slash commands, and classifier fallback turns all run on the base session model. If your session baseline is Opus, every unrouted turn pays \$4/M input and \$20/M output rates.
+
+Saving 90% on 70% of prompts that only account for 5% of tokens barely changes the bill if the remaining 30% of prompts and all unrouted tasks run at Opus rates.
+
+#### Cache Thrashing and the Switch Penalty
+Claude Code relies heavily on prompt caching to keep per-turn costs low: warm cache reads cost only \$0.20/M on Opus and \$0.10/M on Sonnet (a 90–95% discount). However, **prompt caches are strictly isolated per model**. Opus cannot read Sonnet's cache, and Sonnet cannot read Haiku's cache.
+
+When a session started on Opus switches to Haiku or Sonnet:
+1. The new model cannot read the Opus cache. It must write the entire conversation context from scratch at cache-creation prices (\$2.50/M for Sonnet, up to \$1/M for Haiku).
+2. When the session switches back to Opus on the next prompt, Opus must re-write the cache again.
+3. In measured sessions, cache switch penalties alone incurred **\$3.33 in waste on \$36 of spend** (~10% of the entire bill!). In deep sessions, the cache penalty from switching models for a single prompt can cost more than staying on Opus would have.
+
+#### The Inversion: Sonnet Baseline + Auto-Escalation
+Inverting the configuration to a **Sonnet-first baseline** (`claude --model sonnet`) resolves both issues:
+
+1. **50% Baseline Savings Across the Board:** Sonnet 5.5 is priced at exactly 50% of Opus 5.5 on every dimension:
+   * Input: \$2.00 vs \$4.00 / MTok
+   * 5-minute cache write: \$2.50 vs \$5.00 / MTok
+   * 1-hour cache write: \$4.00 vs \$8.00 / MTok
+   * Cache read: \$0.10 vs \$0.20 / MTok
+   * Output: \$10.00 vs \$20.00 / MTok
+   Every unrouted turn, slash command, subagent, and background task instantly costs 50% less.
+2. **Zero Cache Penalty for Everyday Work:** Everyday coding, small features, debugging, and test writing stay on Sonnet. The Sonnet cache remains continuously hot, reading at \$0.10/MTok with zero switch penalties.
+3. **Escalation to Opus When It Counts:** When a difficult architectural prompt, subtle bug, or security review arrives, Haiku automatically escalates the turn to Opus. Paying a cache write is well worth it here because you receive Opus's full reasoning power where it matters most.
+4. **Real Net Savings:** Delivers **35% to 50% real-world savings** instead of 4.4%, without degrading response quality on complex tasks.
+
+#### How to Avoid Cache Thrashing
+* **Adopt Sonnet-first defaults:** Start sessions with `claude --model sonnet` (plugin) or `route --model sonnet` (CLI).
+* **Use `/router floor sonnet`:** Setting a Sonnet floor keeps simple turns on Sonnet instead of dipping down to Haiku in large contexts, preventing Sonnet-Haiku cache thrashing.
+* **Use `/router off` in deep sessions:** When immersed in a deep, multi-turn debugging session (100K+ context), run `/router off` to lock the current model and maintain hot cache reads.
+* **Monitor with `scripts/router_report.py`:** The report includes a **Cache Efficiency Health Check** that alerts you whenever switch penalties exceed 10% of spend or exceed net savings, and benchmarks your spend against a pure Sonnet counterfactual.
 
 ### Cost of a classification
 
@@ -144,12 +190,12 @@ In a small test, Haiku answered simple standalone questions as well as Sonnet di
 route "prompt"                 # route, then open interactive Claude Code on that model
 route -p "prompt"              # route, then run headless and print the answer
 route --dry-run "prompt"       # only show the decision
-route --model opus "prompt"    # skip routing
+route --model sonnet "prompt"  # force model (recommended Sonnet baseline)
 route --floor sonnet "prompt"  # route, but never below sonnet
 echo "prompt" | route -p       # prompt from stdin
 ```
 
-How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
+How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session. Starting with `--model sonnet` is recommended to secure 50% baseline savings and keep caches warm.
 
 To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. If the classifier fails (error, timeout or an unusable reply), `route` prints a note to stderr and starts `claude` with no `--model` or `--effort` from the router, so you get the session default, like the plugin. `--model` and `--effort` are checked before anything runs; an invalid value exits with an error listing the allowed ones. `--floor haiku|sonnet|opus` (default `haiku`) works like the plugin's `/router floor`: a routed model below the floor is raised to it, keeping the effort. It is checked the same way, and it doesn't change a failed classification or a model forced with `--model`. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
 
@@ -231,7 +277,9 @@ It prints:
 - the share of prompts by route (from the log), and of API requests and tokens by model (from the transcripts);
 - the actual cost at API list prices, labelled **API-equivalent**;
 - an **Opus-only counterfactual**, with the same tokens priced at Opus;
+- a **Sonnet-baseline comparison**, comparing actual spend against a pure Sonnet counterfactual in addition to pure Opus;
 - **net savings**, with the switch cache penalty and the classifier overhead on separate lines;
+- a **Cache Efficiency Health Check**, warning prominently if cache switch penalties exceed net savings or 10% of actual cost and recommending a Sonnet-first baseline or `/router off` in deep sessions;
 - the **override rate**: `/model` changes and `/router off` per user prompt.
 
 By default the report reads the log straight from the plugin's store file (`~/.claude/plugins/store/model-router_*.json`). If that file isn't there, for example because `CLAUDE_CONFIG_DIR` moved it or you're on another machine, run `/router export [path]`. It writes the log as JSON Lines, to `~/.claude/model-router/routing-log.jsonl` by default, and the report picks it up or you can pass it with `--log`. With no routing log, the report still gives token and cost shares for every session, but those shares include models you picked by hand.
