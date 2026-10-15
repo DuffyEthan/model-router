@@ -14,7 +14,7 @@ type Store = { data: Record<string, unknown>; writes: string[]; failSet: boolean
 
 // Beneath the plugin: an in-memory store that records every write, Haiku answering
 // `reply`, a session id, and fs.read / fs.write for prices.json and /router export.
-function world(on: On, reply: string | (() => unknown), seed: Record<string, unknown> = {}) {
+function world(on: On, reply: string | (() => unknown), seed: Record<string, unknown> = {}, messages: unknown[] = []) {
   const store: Store = { data: { ...seed }, writes: [], failSet: false }
   const files: Record<string, string> = {}
   on('store.get', (_$, e) => ({ value: store.data[e.key] }) as never)
@@ -31,7 +31,7 @@ function world(on: On, reply: string | (() => unknown), seed: Record<string, unk
   on('session.id', () => ({ value: SESSION }) as never)
   on('command.register', () => ({ value: { command: 'router' } }) as never)
   on('command.run', () => ({ text: '' }) as never)
-  on('session.messages', () => ({ value: [] }) as never)
+  on('session.messages', () => ({ value: messages }) as never)
   on('ui.status', () => ({ value: undefined }) as never)
   on('classic.PostModelSwitch', () => ({}) as never)
   on('env.get', (_$, e) => ({ value: e.name === 'HOME' ? '/home/test' : undefined }) as never)
@@ -297,7 +297,7 @@ describe('/router stats and export', () => {
     world(on, HAIKU)
     await start($)
     expect((await router($, 'banana')).text).toBe(
-      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]',
+      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|guard [on|off|<threshold_tokens>]|export [path]]',
     )
   })
 })
@@ -341,6 +341,51 @@ describe('routing log: floor', () => {
     const text = (await router($, 'stats')).text
     expect(text).toContain('No records yet.')
     expect(text).toContain('Floor: haiku')
+  })
+})
+
+describe('routing log: guard', () => {
+  const LONG_CTX = [{ role: 'user', text: 'x'.repeat(480_000) }] // 120,000 tokens > 100,000
+
+  test('a prompt the guard raised logs the tier used and guarded: true', async ($, on) => {
+    const { store } = world(on, HAIKU, {}, LONG_CTX)
+    await start($)
+    await submit($, 'what does ls -la do')
+    expect(prompts(store)[0]).toMatchObject({ tier: 'sonnet', effort: 'low', outcome: 'ok', guarded: true })
+  })
+
+  test('a prompt under the guard threshold carries no guarded field', async ($, on) => {
+    const { store } = world(on, HAIKU, {}, [{ role: 'user', text: 'short' }])
+    await start($)
+    await submit($, 'what does ls -la do')
+    expect('guarded' in (prompts(store)[0] ?? {})).toBe(false)
+  })
+
+  test('/router guard saves the setting in the store; a bad one writes nothing', async ($, on) => {
+    const { store } = world(on, HAIKU)
+    await start($)
+    await router($, 'guard 50000')
+    expect(store.data.guard).toEqual({ enabled: true, threshold: 50000 })
+    await router($, 'guard off')
+    expect(store.data.guard).toEqual({ enabled: false, threshold: 50000 })
+    await router($, 'guard banana')
+    expect(store.data.guard).toEqual({ enabled: false, threshold: 50000 })
+    await router($, 'guard on')
+    expect(store.data.guard).toEqual({ enabled: true, threshold: 50000 })
+  })
+
+  test('stats shows the current guard', async ($, on) => {
+    world(on, HAIKU, { guard: { enabled: true, threshold: 50000 } })
+    await start($)
+    expect((await router($, 'stats')).text).toContain('\nGuard: on (50000 tokens)')
+  })
+
+  test('stats reports guarded prompt count when present', async ($, on) => {
+    world(on, HAIKU, {}, LONG_CTX)
+    await start($)
+    await submit($, 'a prompt')
+    const text = (await router($, 'stats')).text
+    expect(text).toContain('Guarded prompts: 1')
   })
 })
 

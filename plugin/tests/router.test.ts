@@ -5,14 +5,22 @@ const STEP = { turnId: 't1', index: 0, model: 'claude-opus-5-5', effort: 'high',
 
 // Beneath the plugin: Haiku "answers" with `reply`; the session has no history.
 // Returns the status-line texts the plugin set, in order.
-function world(on: On, reply: string | (() => unknown), stored: Record<string, unknown> = {}) {
+function world(
+  on: On,
+  reply: string | (() => unknown),
+  stored: Record<string, unknown> = {},
+  messages: unknown[] | (() => unknown) = [],
+) {
   const statuses: (string | undefined)[] = []
   mock.store(on, stored)
   on('prompt.submit', (_$, e) => ({ text: e.text }) as never)
   on('session.start', (_$, e) => ({ cwd: e.cwd }) as never)
   on('command.register', () => ({ value: { command: 'router' } }) as never)
   on('command.run', () => ({ text: '' }) as never)
-  on('session.messages', () => ({ value: [] }) as never)
+  on('session.messages', () => {
+    const val = typeof messages === 'function' ? messages() : messages
+    return { value: val } as never
+  })
   on('ui.status', (_$, e) => {
     statuses.push(e.text)
     return { value: undefined } as never
@@ -408,7 +416,7 @@ describe('/router floor', () => {
       world(on, HAIKU, { floor: 'sonnet' })
       await start($)
       expect((await router($, args)).text).toBe(
-        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]',
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|guard [on|off|<threshold_tokens>]|export [path]]',
       )
       expect((await router($, 'floor')).text).toContain('Floor: sonnet')
     })
@@ -510,4 +518,109 @@ describe('/router floor leaves unrouted turns alone', () => {
     await step($, SESSION)
     expect(sent).toEqual([SESSION])
   })
+})
+
+describe('/router guard', () => {
+  const SHORT_CTX = [{ role: 'user', text: 'x'.repeat(200_000) }] // 50,000 tokens < 100,000
+  const LONG_CTX = [{ role: 'user', text: 'x'.repeat(480_000) }] // 120,000 tokens > 100,000
+  const MEDIUM_CTX = [{ role: 'user', text: 'x'.repeat(240_000) }] // 60,000 tokens
+
+  test('context under 100K routes to Haiku as normal', async ($, on) => {
+    const statuses = world(on, HAIKU, {}, SHORT_CTX)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'what does ls -la do')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+    expect(statuses).toEqual(['router → haiku · low'])
+    expect((await router($, 'guard')).text).toContain('Guard: on (100000 tokens)')
+  })
+
+  test('context over 100K with guard on elevates Haiku to Sonnet @ low effort', async ($, on) => {
+    const statuses = world(on, HAIKU, {}, LONG_CTX)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'what does ls -la do')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'low' }])
+    expect(statuses).toEqual(['router → sonnet · low'])
+    const text = (await router($, 'status')).text
+    expect(text).toContain('Guard: on (100000 tokens)')
+    expect(text).toContain('Last route: sonnet · low — trivial (raised from haiku by the guard)')
+    expect(text).toContain('haiku 0, sonnet 1, opus 0')
+  })
+
+  test('setting /router guard off allows Haiku above 100K', async ($, on) => {
+    const statuses = world(on, HAIKU, {}, LONG_CTX)
+    const sent = captureStep(on)
+    await start($)
+    expect((await router($, 'guard off')).text).toBe('Guard: off')
+    await submit($, 'what does ls -la do')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+    expect(statuses).toEqual(['router → haiku · low'])
+    expect((await router($, 'status')).text).toContain('Guard: off')
+  })
+
+  test('setting custom threshold /router guard 50000', async ($, on) => {
+    const statuses = world(on, HAIKU, {}, MEDIUM_CTX) // 60,000 tokens > 50,000
+    const sent = captureStep(on)
+    await start($)
+    expect((await router($, 'guard 50000')).text).toBe('Guard: on (50000 tokens)')
+    await submit($, 'what does ls -la do')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'low' }])
+    expect(statuses).toEqual(['router → sonnet · low'])
+    expect((await router($, 'status')).text).toContain('Guard: on (50000 tokens)')
+  })
+
+  test('stored guard setting persistence', async ($, on) => {
+    world(on, HAIKU, { guard: { enabled: true, threshold: 50000 } }, MEDIUM_CTX)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'what does ls -la do')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'low' }])
+    expect((await router($, 'guard')).text).toBe('Guard: on (50000 tokens)')
+  })
+
+  test('/router guard on re-enables guard', async ($, on) => {
+    world(on, HAIKU, { guard: { enabled: false, threshold: 100000 } }, LONG_CTX)
+    const sent = captureStep(on)
+    await start($)
+    expect((await router($, 'guard on')).text).toBe('Guard: on (100000 tokens)')
+    await submit($, 'what does ls -la do')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'low' }])
+  })
+
+  test('guard does not elevate sonnet or opus', async ($, on) => {
+    world(on, '{"model":"opus","effort":"high","reason":"hard"}', {}, LONG_CTX)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'design something')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-opus-5-5', effort: 'high' }])
+  })
+
+  for (const args of ['guard banana', 'guard -10', 'guard 0', 'guards']) {
+    test(`rejects /router ${args}`, async ($, on) => {
+      world(on, HAIKU)
+      await start($)
+      expect((await router($, args)).text).toContain('Usage: /router')
+      expect((await router($, 'guard')).text).toContain('Guard: on (100000 tokens)')
+    })
+  }
+
+  for (const corrupt of ['banana', '', -5, 0, null, true, ['50000']]) {
+    test(`a stored guard of ${JSON.stringify(corrupt)} defaults to 100000 tokens`, async ($, on) => {
+      world(on, HAIKU, { guard: corrupt }, SHORT_CTX)
+      const sent = captureStep(on)
+      await start($)
+      await submit($, 'hi')
+      await step($)
+      expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+      expect((await router($, 'guard')).text).toBe('Guard: on (100000 tokens)')
+    })
+  }
 })

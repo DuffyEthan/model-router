@@ -34,6 +34,7 @@ export type PromptRecord = {
   originKind: string // PromptOrigin.kind as the engine stamped it ('none' when absent)
   midTurn: boolean // prompt.submit carried a turnId: typed over / delivered into a running turn
   floored?: true // the classifier picked a tier below /router floor; `tier` is the floor
+  guarded?: true // context exceeded guard threshold; haiku elevated to sonnet
   usage?: ClassifierUsage // the classifier call's own tokens, when it reported them
 }
 
@@ -134,6 +135,8 @@ export function formatStats(log: readonly LogRecord[], price: HaikuPrice | undef
       `opus ${tiers.opus} (${pct(tiers.opus, prompts.length)}), ` +
       `session model ${prompts.length - routed.length} (${pct(prompts.length - routed.length, prompts.length)})`,
   )
+  const guarded = prompts.filter(r => r.guarded).length
+  if (guarded > 0) lines.push(`Guarded prompts: ${guarded}`)
 
   const outcomes = { ok: 0, failed: 0, timeout: 0, skipped: 0 }
   for (const r of prompts) outcomes[r.outcome] = (outcomes[r.outcome] ?? 0) + 1
