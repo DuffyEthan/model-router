@@ -17,18 +17,57 @@ import {
 
 type Tier = 'haiku' | 'sonnet' | 'opus'
 // `raisedFrom`: the tier the classifier picked when the floor raised it.
-type Route = { model: Tier; effort: ModelEffort; reason: string; raisedFrom?: Tier }
-type Classified = { route?: Route; outcome: Exclude<Outcome, 'skipped'>; usage?: ClassifierUsage }
+// `guarded`: true when context length exceeded the guard threshold, raising haiku to sonnet.
+type Route = { model: Tier; effort: ModelEffort; reason: string; raisedFrom?: Tier; guarded?: true }
+type Classified = {
+  route?: Route
+  outcome: Exclude<Outcome, 'skipped'>
+  usage?: ClassifierUsage
+  contextTokens?: number
+}
 
 const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus']
 const CLASSIFIER_TIMEOUT_MS = 20000
-const USAGE = 'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]'
+const USAGE = 'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|guard [on|off|<threshold_tokens>]|export [path]]'
 const EFFORTS: readonly ModelEffort[] = ['low', 'medium', 'high', 'xhigh']
 const DEFAULT_FLOOR: Tier = 'haiku' // no floor: every tier can be routed to
+const DEFAULT_GUARD_THRESHOLD = 100_000
+
+type GuardConfig = { enabled: boolean; threshold: number }
+const DEFAULT_GUARD: GuardConfig = { enabled: true, threshold: DEFAULT_GUARD_THRESHOLD }
 
 // The persisted floor, or the default when it is unset, unknown or corrupt.
 function asFloor(v: unknown): Tier {
   return TIERS.includes(v as Tier) ? (v as Tier) : DEFAULT_FLOOR
+}
+
+// The persisted guard, or the default when it is unset, unknown or corrupt.
+function asGuard(v: unknown): GuardConfig {
+  if (v === false || v === 'off') {
+    return { enabled: false, threshold: DEFAULT_GUARD_THRESHOLD }
+  }
+  if (v === true || v === 'on') {
+    return { enabled: true, threshold: DEFAULT_GUARD_THRESHOLD }
+  }
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) {
+    return { enabled: true, threshold: Math.round(v) }
+  }
+  if (typeof v === 'string') {
+    const parsed = Number(v.replace(/[,_]/g, ''))
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return { enabled: true, threshold: Math.round(parsed) }
+    }
+  }
+  if (typeof v === 'object' && v !== null) {
+    const o = v as Record<string, unknown>
+    const enabled = o.enabled !== false
+    const threshold =
+      typeof o.threshold === 'number' && Number.isFinite(o.threshold) && o.threshold > 0
+        ? Math.round(o.threshold)
+        : DEFAULT_GUARD_THRESHOLD
+    return { enabled, threshold }
+  }
+  return { enabled: true, threshold: DEFAULT_GUARD_THRESHOLD }
 }
 
 // Never route below `floor`. A raised route keeps the classifier's effort when the floor
@@ -38,6 +77,15 @@ function applyFloor(r: Route, floor: Tier): Route {
   if (TIERS.indexOf(r.model) >= TIERS.indexOf(floor)) return r
   const effort = EFFORTS.includes(r.effort) ? r.effort : 'medium'
   return { ...r, model: floor, effort, raisedFrom: r.model }
+}
+
+// If estimated context tokens exceed guard.threshold, guard against Haiku by elevating
+// haiku to sonnet, preserving the classifier's effort level.
+function applyGuard(r: Route, guard: GuardConfig, contextTokens: number): Route {
+  if (!guard.enabled || contextTokens <= guard.threshold) return r
+  if (r.model !== 'haiku') return r
+  const effort = EFFORTS.includes(r.effort) ? r.effort : 'medium'
+  return { ...r, model: 'sonnet', effort, guarded: true }
 }
 
 // turn.step takes full model ids, not aliases. Update these when new models ship.
@@ -87,18 +135,20 @@ Rules:
 Reply with only a JSON object, no prose: {"model": "haiku"|"sonnet"|"opus", "effort": "low"|"medium"|"high"|"xhigh", "reason": "<one short sentence>"}`
 
 export const register: Register = on => {
-  // Module state resets on a hot reload; `enabled` and `floor` are persisted in $.store.
+  // Module state resets on a hot reload; `enabled`, `floor`, and `guard` are persisted in $.store.
   let enabled = true
   let floor: Tier = DEFAULT_FLOOR
+  let guard: GuardConfig = DEFAULT_GUARD
   let route: Route | undefined
   const counts: Record<Tier, number> = { haiku: 0, sonnet: 0, opus: 0 }
 
   on('session.start', async ($, e, next) => {
     enabled = (await $.store.get('enabled')) !== false
     floor = asFloor(await $.store.get('floor'))
+    guard = asGuard(await $.store.get('guard'))
     await $.command.register({
       name: 'router',
-      description: 'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]',
+      description: 'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|guard [on|off|<threshold_tokens>]|export [path]]',
     })
     return next(e)
   })
@@ -128,7 +178,10 @@ export const register: Register = on => {
         c = { outcome: 'failed' } // a classifier error must never block the prompt
       }
       latencyMs = await elapsedSince($, t0)
-      route = c.route && applyFloor(c.route, floor)
+      const contextTokens = c.contextTokens ?? (await estimateContextTokens($))
+      let r = c.route && applyFloor(c.route, floor)
+      r = r && applyGuard(r, guard, contextTokens)
+      route = r
       outcome = c.outcome
       usage = c.usage
       if (route) {
@@ -154,6 +207,7 @@ export const register: Register = on => {
       originKind: e.origin?.kind ?? 'none',
       midTurn: e.turnId !== undefined,
       ...(route?.raisedFrom ? { floored: true } : {}),
+      ...(route?.guarded ? { guarded: true } : {}),
       ...(usage ? { usage } : {}),
     }
     const result = await next(e)
@@ -210,7 +264,9 @@ export const register: Register = on => {
   on('command.run', { command: 'router' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'stats') {
-      return { text: `${formatStats(await readLog($), await readClassifierPrice($))}\nFloor: ${floor}` }
+      return {
+        text: `${formatStats(await readLog($), await readClassifierPrice($))}\nFloor: ${floor}\nGuard: ${guard.enabled ? `on (${guard.threshold} tokens)` : 'off'}`,
+      }
     }
     if (arg === 'floor' || arg.startsWith('floor ')) {
       const want = arg.slice('floor'.length).trim()
@@ -220,6 +276,26 @@ export const register: Register = on => {
         await $.store.set('floor', floor)
       }
       return { text: `Floor: ${floor} (the router never picks a model below ${floor})` }
+    }
+    if (arg === 'guard' || arg.startsWith('guard ')) {
+      const want = arg.slice('guard'.length).trim()
+      if (want) {
+        if (want === 'off') {
+          guard = { ...guard, enabled: false }
+          await $.store.set('guard', guard)
+        } else if (want === 'on') {
+          guard = { ...guard, enabled: true }
+          await $.store.set('guard', guard)
+        } else {
+          const num = Number(want.replace(/[,_]/g, ''))
+          if (!Number.isFinite(num) || num <= 0 || !Number.isInteger(num)) {
+            return { text: USAGE }
+          }
+          guard = { enabled: true, threshold: num }
+          await $.store.set('guard', guard)
+        }
+      }
+      return { text: `Guard: ${guard.enabled ? `on (${guard.threshold} tokens)` : 'off'}` }
     }
     if (arg === 'export' || arg.startsWith('export ')) {
       try {
@@ -249,12 +325,17 @@ export const register: Register = on => {
     } else if (arg && arg !== 'status') {
       return { text: USAGE }
     }
-    const raised = route?.raisedFrom ? ` (raised from ${route.raisedFrom} by the floor)` : ''
+    const raised = route?.guarded
+      ? ' (raised from haiku by the guard)'
+      : route?.raisedFrom
+        ? ` (raised from ${route.raisedFrom} by the floor)`
+        : ''
     const last = route ? `${route.model} · ${route.effort} — ${route.reason}${raised}` : 'none yet'
     return {
       text: [
         `Model router: ${enabled ? 'on' : 'off'}`,
         `Floor: ${floor}`,
+        `Guard: ${guard.enabled ? `on (${guard.threshold} tokens)` : 'off'}`,
         `Last route: ${last}`,
         `This session: haiku ${counts.haiku}, sonnet ${counts.sonnet}, opus ${counts.opus}`,
       ].join('\n'),
@@ -294,11 +375,49 @@ async function elapsedSince($: EngineInterface, t0: number | undefined): Promise
   }
 }
 
+function messageTextLength(m: unknown): number {
+  if (!m || typeof m !== 'object') return 0
+  const msg = m as Record<string, unknown>
+  if (typeof msg.text === 'string') return msg.text.length
+  if (typeof msg.content === 'string') return msg.content.length
+  if (Array.isArray(msg.content)) {
+    let len = 0
+    for (const part of msg.content) {
+      if (part && typeof part === 'object') {
+        const p = part as Record<string, unknown>
+        if (typeof p.text === 'string') len += p.text.length
+      }
+    }
+    return len
+  }
+  return 0
+}
+
+function estimateContextTokensFromMessages(messages: unknown): number {
+  if (!Array.isArray(messages)) return 0
+  let chars = 0
+  for (const m of messages) {
+    chars += messageTextLength(m)
+  }
+  return Math.floor(chars / 4)
+}
+
+async function estimateContextTokens($: EngineInterface): Promise<number> {
+  try {
+    const messages = await $.session.messages()
+    return estimateContextTokensFromMessages(messages)
+  } catch {
+    return 0
+  }
+}
+
 async function classify($: EngineInterface, text: string): Promise<Classified> {
   let context = ''
+  let contextTokens = 0
   try {
     const messages = await $.session.messages()
     if (Array.isArray(messages)) {
+      contextTokens = estimateContextTokensFromMessages(messages)
       context = messages
         .slice(-4)
         .filter(m => m.text)
@@ -324,18 +443,23 @@ async function classify($: EngineInterface, text: string): Promise<Classified> {
   const usage = toUsage(r?.usage)
   if (!r.isAnswered) {
     // 'aborted' is the timeoutMs cut (or the turn's own abort); everything else failed.
-    return { outcome: r.reason === 'aborted' ? 'timeout' : 'failed', usage }
+    return { outcome: r.reason === 'aborted' ? 'timeout' : 'failed', usage, contextTokens }
   }
 
   const json = r.text.match(/\{[\s\S]*\}/)?.[0]
-  if (!json) return { outcome: 'failed', usage }
+  if (!json) return { outcome: 'failed', usage, contextTokens }
   try {
     const d = JSON.parse(json) as Partial<Route>
-    if (!d.model || !TIERS.includes(d.model)) return { outcome: 'failed', usage }
+    if (!d.model || !TIERS.includes(d.model)) return { outcome: 'failed', usage, contextTokens }
     const effort = d.effort && EFFORTS.includes(d.effort) ? d.effort : 'medium'
-    return { route: { model: d.model, effort, reason: String(d.reason ?? '') }, outcome: 'ok', usage }
+    return {
+      route: { model: d.model, effort, reason: String(d.reason ?? '') },
+      outcome: 'ok',
+      usage,
+      contextTokens,
+    }
   } catch {
-    return { outcome: 'failed', usage }
+    return { outcome: 'failed', usage, contextTokens }
   }
 }
 
