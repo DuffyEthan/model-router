@@ -16,19 +16,30 @@ import {
 } from './tracker'
 
 type Tier = 'haiku' | 'sonnet' | 'opus'
+type BackgroundTier = 'session' | 'sonnet' | 'haiku'
 // `raisedFrom`: the tier the classifier picked when the floor raised it.
 type Route = { model: Tier; effort: ModelEffort; reason: string; raisedFrom?: Tier }
 type Classified = { route?: Route; outcome: Exclude<Outcome, 'skipped'>; usage?: ClassifierUsage }
 
 const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus']
+const BACKGROUND_TIERS: readonly BackgroundTier[] = ['session', 'sonnet', 'haiku']
 const CLASSIFIER_TIMEOUT_MS = 20000
-const USAGE = 'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]'
+const USAGE = 'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]'
 const EFFORTS: readonly ModelEffort[] = ['low', 'medium', 'high', 'xhigh']
 const DEFAULT_FLOOR: Tier = 'haiku' // no floor: every tier can be routed to
+const DEFAULT_BACKGROUND: BackgroundTier = 'session'
+const BACKGROUND_EFFORTS: Record<'sonnet' | 'haiku', ModelEffort> = {
+  sonnet: 'medium',
+  haiku: 'low',
+}
 
 // The persisted floor, or the default when it is unset, unknown or corrupt.
 function asFloor(v: unknown): Tier {
   return TIERS.includes(v as Tier) ? (v as Tier) : DEFAULT_FLOOR
+}
+
+function asBackground(v: unknown): BackgroundTier {
+  return BACKGROUND_TIERS.includes(v as BackgroundTier) ? (v as BackgroundTier) : DEFAULT_BACKGROUND
 }
 
 // Never route below `floor`. A raised route keeps the classifier's effort when the floor
@@ -87,18 +98,20 @@ Rules:
 Reply with only a JSON object, no prose: {"model": "haiku"|"sonnet"|"opus", "effort": "low"|"medium"|"high"|"xhigh", "reason": "<one short sentence>"}`
 
 export const register: Register = on => {
-  // Module state resets on a hot reload; `enabled` and `floor` are persisted in $.store.
+  // Module state resets on a hot reload; `enabled`, `floor` and `background` are persisted in $.store.
   let enabled = true
   let floor: Tier = DEFAULT_FLOOR
+  let background: BackgroundTier = DEFAULT_BACKGROUND
   let route: Route | undefined
   const counts: Record<Tier, number> = { haiku: 0, sonnet: 0, opus: 0 }
 
   on('session.start', async ($, e, next) => {
     enabled = (await $.store.get('enabled')) !== false
     floor = asFloor(await $.store.get('floor'))
+    background = asBackground(await $.store.get('background'))
     await $.command.register({
       name: 'router',
-      description: 'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]',
+      description: 'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]',
     })
     return next(e)
   })
@@ -116,7 +129,16 @@ export const register: Register = on => {
     let usage: ClassifierUsage | undefined
     let latencyMs: number | null = null
     if (!enabled) skip = 'off'
-    else if (!isUser) skip = 'non-user'
+    else if (!isUser) {
+      if (background !== 'session') {
+        const effort = BACKGROUND_EFFORTS[background]
+        route = { model: background, effort, reason: 'background' }
+        counts[background] += 1
+        $.ui.status(`router → ${background} · ${effort}`)
+      } else {
+        skip = 'non-user'
+      }
+    }
     else if (!text.trim()) skip = 'empty'
     else if (text.trimStart().startsWith('/')) skip = 'slash'
     else {
@@ -154,6 +176,7 @@ export const register: Register = on => {
       originKind: e.origin?.kind ?? 'none',
       midTurn: e.turnId !== undefined,
       ...(route?.raisedFrom ? { floored: true } : {}),
+      ...(route?.reason === 'background' ? { backgroundTier: route.model } : {}),
       ...(usage ? { usage } : {}),
     }
     const result = await next(e)
@@ -197,11 +220,18 @@ export const register: Register = on => {
   })
 
   // Rewrite every main-thread model request of the turn to the routed model.
-  // Subagents keep their own configured models.
+  // Rewrite subagent requests to the background tier when configured.
   on('turn.step', async function* ($, e, next) {
-    if (!enabled || !route || e.agentId !== undefined) {
-      return yield* next(e)
+    if (!enabled) return yield* next(e)
+
+    if (e.agentId !== undefined) {
+      if (background === 'session') return yield* next(e)
+      const model = modelId(e.model, background)
+      if (!model) return yield* next(e)
+      return yield* next({ ...e, model, effort: BACKGROUND_EFFORTS[background] })
     }
+
+    if (!route) return yield* next(e)
     const model = modelId(e.model, route.model)
     if (!model) return yield* next(e) // unrecognised id format: leave the request alone
     return yield* next({ ...e, model, effort: route.effort })
@@ -210,7 +240,7 @@ export const register: Register = on => {
   on('command.run', { command: 'router' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'stats') {
-      return { text: `${formatStats(await readLog($), await readClassifierPrice($))}\nFloor: ${floor}` }
+      return { text: `${formatStats(await readLog($), await readClassifierPrice($))}\nFloor: ${floor}\nBackground: ${background}` }
     }
     if (arg === 'floor' || arg.startsWith('floor ')) {
       const want = arg.slice('floor'.length).trim()
@@ -220,6 +250,15 @@ export const register: Register = on => {
         await $.store.set('floor', floor)
       }
       return { text: `Floor: ${floor} (the router never picks a model below ${floor})` }
+    }
+    if (arg === 'background' || arg.startsWith('background ')) {
+      const want = arg.slice('background'.length).trim()
+      if (want) {
+        if (!BACKGROUND_TIERS.includes(want as BackgroundTier)) return { text: USAGE }
+        background = want as BackgroundTier
+        await $.store.set('background', background)
+      }
+      return { text: `Background: ${background} (background notifications and subagents route to ${background})` }
     }
     if (arg === 'export' || arg.startsWith('export ')) {
       try {
@@ -255,6 +294,7 @@ export const register: Register = on => {
       text: [
         `Model router: ${enabled ? 'on' : 'off'}`,
         `Floor: ${floor}`,
+        `Background: ${background}`,
         `Last route: ${last}`,
         `This session: haiku ${counts.haiku}, sonnet ${counts.sonnet}, opus ${counts.opus}`,
       ].join('\n'),
