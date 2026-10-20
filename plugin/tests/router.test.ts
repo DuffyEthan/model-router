@@ -688,6 +688,42 @@ describe('subagent routing', () => {
     expect(sent).toEqual([{ model: 'us.anthropic.claude-sonnet-5-5', effort: 'medium' }])
   })
 
+  test('a haiku subagent stays on haiku when background is sonnet', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'claude-haiku-5-5', effort: 'low', agentId: 'sub-explore-1' })
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+  })
+
+  test('an opus subagent goes to sonnet when background is sonnet', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'claude-opus-5-5', agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'medium' }])
+  })
+
+  test('a sonnet subagent goes to haiku when background is haiku', async ($, on) => {
+    world(on, HAIKU, { background: 'haiku' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'claude-sonnet-5-5', agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+  })
+
+  test('a subagent already on the background tier keeps its model and effort', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'us.anthropic.claude-sonnet-5-5', effort: 'high', agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: 'us.anthropic.claude-sonnet-5-5', effort: 'high' }])
+  })
+
   test('subagents leave unrecognised model ids unchanged', async ($, on) => {
     world(on, HAIKU, { background: 'sonnet' })
     const sent = captureStep(on)

@@ -18,7 +18,8 @@ import {
 type Tier = 'haiku' | 'sonnet' | 'opus'
 type BackgroundTier = 'session' | 'sonnet' | 'haiku'
 // `raisedFrom`: the tier the classifier picked when the floor raised it.
-type Route = { model: Tier; effort: ModelEffort; reason: string; raisedFrom?: Tier }
+// `background`: the route came from the /router background setting, not the classifier.
+type Route = { model: Tier; effort: ModelEffort; reason: string; raisedFrom?: Tier; background?: true }
 type Classified = { route?: Route; outcome: Exclude<Outcome, 'skipped'>; usage?: ClassifierUsage }
 
 const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus']
@@ -68,17 +69,23 @@ const MODEL_IDS: Record<Tier, string> = {
 // snapshot, an ARN, a "[1m]" variant, an unknown prefix) is unrecognised: the target
 // tier's suffix can't be derived from it, so the request is left unchanged.
 const BEDROCK_PREFIX = /^(?:(?:us|us-gov|eu|apac|jp|au|global)\.)?anthropic\.$/
-const SESSION_ID = /^(.*?)claude-[a-z]+-\d+(?:-\d+)?(-\d{8})?$/
+const SESSION_ID = /^(.*?)claude-([a-z]+)-\d+(?:-\d+)?(-\d{8})?$/
 
 // The full model id for `tier` in the session model's provider format, or undefined
 // when that format isn't recognised.
 function modelId(current: string, tier: Tier): string | undefined {
   const m = current.match(SESSION_ID)
   if (!m) return undefined
-  const [, prefix = '', dated] = m
+  const [, prefix = '', , dated] = m
   if (prefix === '') return MODEL_IDS[tier] // first-party or Vertex
   if (dated || !BEDROCK_PREFIX.test(prefix)) return undefined
   return prefix + MODEL_IDS[tier]
+}
+
+// The tier of a model id, or undefined when it isn't a recognised Haiku/Sonnet/Opus id.
+function tierOf(current: string): Tier | undefined {
+  const family = current.match(SESSION_ID)?.[2]
+  return TIERS.includes(family as Tier) ? (family as Tier) : undefined
 }
 
 const SYSTEM = `You are a router. You never answer the user's message. You only decide which Claude model and effort level should answer it, choosing the CHEAPEST option likely to produce a fully correct answer.
@@ -132,7 +139,7 @@ export const register: Register = on => {
     else if (!isUser) {
       if (background !== 'session') {
         const effort = BACKGROUND_EFFORTS[background]
-        route = { model: background, effort, reason: 'background' }
+        route = { model: background, effort, reason: 'background', background: true }
         counts[background] += 1
         $.ui.status(`router → ${background} · ${effort}`)
       } else {
@@ -176,7 +183,7 @@ export const register: Register = on => {
       originKind: e.origin?.kind ?? 'none',
       midTurn: e.turnId !== undefined,
       ...(route?.raisedFrom ? { floored: true } : {}),
-      ...(route?.reason === 'background' ? { backgroundTier: route.model } : {}),
+      ...(route?.background ? { backgroundTier: route.model } : {}),
       ...(usage ? { usage } : {}),
     }
     const result = await next(e)
@@ -220,14 +227,16 @@ export const register: Register = on => {
   })
 
   // Rewrite every main-thread model request of the turn to the routed model.
-  // Rewrite subagent requests to the background tier when configured.
+  // Downgrade subagent requests above the background tier to it when configured; a
+  // subagent already at or below it (e.g. a Haiku Explore agent) keeps its own model.
   on('turn.step', async function* ($, e, next) {
     if (!enabled) return yield* next(e)
 
     if (e.agentId !== undefined) {
       if (background === 'session') return yield* next(e)
+      const tier = tierOf(e.model)
       const model = modelId(e.model, background)
-      if (!model) return yield* next(e)
+      if (!tier || !model || TIERS.indexOf(tier) <= TIERS.indexOf(background)) return yield* next(e)
       return yield* next({ ...e, model, effort: BACKGROUND_EFFORTS[background] })
     }
 

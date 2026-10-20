@@ -377,6 +377,14 @@ describe('routing log: background', () => {
     expect('backgroundTier' in (prompts(store)[0] ?? {})).toBe(false)
   })
 
+  test('a classifier reason of "background" does not log backgroundTier', async ($, on) => {
+    const { store } = world(on, '{"model":"haiku","effort":"low","reason":"background"}', { background: 'sonnet' })
+    await start($)
+    await submit($, 'what does ls -la do')
+    expect(prompts(store)[0]).toMatchObject({ tier: 'haiku', outcome: 'ok' })
+    expect('backgroundTier' in (prompts(store)[0] ?? {})).toBe(false)
+  })
+
   test('/router background saves the setting in the store; a bad one writes nothing', async ($, on) => {
     const { store } = world(on, HAIKU)
     await start($)
