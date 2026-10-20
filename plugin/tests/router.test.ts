@@ -408,7 +408,7 @@ describe('/router floor', () => {
       world(on, HAIKU, { floor: 'sonnet' })
       await start($)
       expect((await router($, args)).text).toBe(
-        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]',
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]',
       )
       expect((await router($, 'floor')).text).toContain('Floor: sonnet')
     })
@@ -509,5 +509,227 @@ describe('/router floor leaves unrouted turns alone', () => {
     await submit($, 'hi')
     await step($, SESSION)
     expect(sent).toEqual([SESSION])
+  })
+})
+
+describe('/router background', () => {
+  test('status shows the default background setting', async ($, on) => {
+    world(on, HAIKU)
+    await start($)
+    expect((await router($)).text).toContain('Background: session')
+    expect((await router($, 'background')).text).toBe(
+      'Background: session (background notifications and subagents route to session)',
+    )
+  })
+
+  test('/router background <tier> sets it, is case-insensitive and reports it', async ($, on) => {
+    world(on, HAIKU)
+    await start($)
+    expect((await router($, 'background Sonnet')).text).toBe(
+      'Background: sonnet (background notifications and subagents route to sonnet)',
+    )
+    expect((await router($)).text).toContain('Background: sonnet')
+    expect((await router($, 'background haiku')).text).toBe(
+      'Background: haiku (background notifications and subagents route to haiku)',
+    )
+    expect((await router($)).text).toContain('Background: haiku')
+    expect((await router($, 'background session')).text).toBe(
+      'Background: session (background notifications and subagents route to session)',
+    )
+    expect((await router($)).text).toContain('Background: session')
+  })
+
+  for (const args of ['background opus', 'background banana', 'background gpt-4', 'background sonnet haiku', 'background 2', 'backgrounds']) {
+    test(`rejects /router ${args} and keeps the background setting`, async ($, on) => {
+      world(on, HAIKU, { background: 'sonnet' })
+      await start($)
+      expect((await router($, args)).text).toBe(
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]',
+      )
+      expect((await router($, 'background')).text).toContain('Background: sonnet')
+    })
+  }
+
+  test('a background setting saved by an earlier session is honoured', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'Background task finished', { kind: 'task-notification' })
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'medium' }])
+  })
+
+  for (const corrupt of ['banana', 'Sonnet', '', 3, null, true, ['sonnet'], { tier: 'sonnet' }]) {
+    test(`a stored background of ${JSON.stringify(corrupt)} is treated as session`, async ($, on) => {
+      world(on, HAIKU, { background: corrupt })
+      const sent = captureStep(on)
+      await start($)
+      await submit($, 'Background task finished', { kind: 'task-notification' })
+      await step($)
+      expect(sent).toEqual([{ model: STEP.model, effort: STEP.effort }])
+      expect((await router($, 'background')).text).toContain('Background: session')
+    })
+  }
+})
+
+describe('background origin routing', () => {
+  for (const origin of [
+    { kind: 'task-notification' },
+    { kind: 'peer' },
+    { kind: 'scheduled-trigger' },
+    { kind: 'unclassified' },
+  ]) {
+    test(`routes ${origin.kind} to sonnet @ medium when configured`, async ($, on) => {
+      let calls = 0
+      const statuses = world(on, () => {
+        calls += 1
+        return { isAnswered: true, text: HAIKU, usage: {} } as never
+      }, { background: 'sonnet' })
+      const sent = captureStep(on)
+      await start($)
+      await submit($, 'Background event occurred', origin)
+      await step($)
+      expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'medium' }])
+      expect(calls).toBe(0) // classifier is not called
+      expect(statuses).toEqual(['router → sonnet · medium'])
+    })
+
+    test(`routes ${origin.kind} to haiku @ low when configured`, async ($, on) => {
+      let calls = 0
+      const statuses = world(on, () => {
+        calls += 1
+        return { isAnswered: true, text: HAIKU, usage: {} } as never
+      }, { background: 'haiku' })
+      const sent = captureStep(on)
+      await start($)
+      await submit($, 'Background event occurred', origin)
+      await step($)
+      expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+      expect(calls).toBe(0)
+      expect(statuses).toEqual(['router → haiku · low'])
+    })
+  }
+
+  test('preserves provider prefix on background routed turns', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'task update', { kind: 'task-notification' })
+    await step($, { model: 'anthropic.claude-opus-5-5' })
+    expect(sent).toEqual([{ model: 'anthropic.claude-sonnet-5-5', effort: 'medium' }])
+  })
+
+  test('router off leaves background origins on session model', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet', enabled: false })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'task update', { kind: 'task-notification' })
+    await step($)
+    expect(sent).toEqual([{ model: STEP.model, effort: STEP.effort }])
+  })
+})
+
+describe('subagent routing', () => {
+  test('routes subagent requests to configured sonnet tier', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'run background task')
+    await step($, { agentId: 'sub-worker-1' })
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'medium' }])
+  })
+
+  test('routes subagent requests to configured haiku tier', async ($, on) => {
+    world(on, HAIKU, { background: 'haiku' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'run background task')
+    await step($, { agentId: 'sub-worker-1' })
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+  })
+
+  test('main thread uses classified route while subagents use background tier', async ($, on) => {
+    world(on, '{"model":"opus","effort":"high","reason":"complex architecture"}', { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'design complex architecture')
+    await step($) // main thread step
+    await step($, { agentId: 'sub-search-1' }) // subagent step
+    expect(sent).toEqual([
+      { model: 'claude-opus-5-5', effort: 'high' },
+      { model: 'claude-sonnet-5-5', effort: 'medium' },
+    ])
+  })
+
+  test('leaves subagent requests on session model when background is session', async ($, on) => {
+    world(on, HAIKU, { background: 'session' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: STEP.model, effort: STEP.effort }])
+  })
+
+  test('router off leaves subagent requests on session model', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet', enabled: false })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: STEP.model, effort: STEP.effort }])
+  })
+
+  test('subagents preserve provider prefixes', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'us.anthropic.claude-opus-5-5', agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: 'us.anthropic.claude-sonnet-5-5', effort: 'medium' }])
+  })
+
+  test('a haiku subagent stays on haiku when background is sonnet', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'claude-haiku-5-5', effort: 'low', agentId: 'sub-explore-1' })
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+  })
+
+  test('an opus subagent goes to sonnet when background is sonnet', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'claude-opus-5-5', agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'medium' }])
+  })
+
+  test('a sonnet subagent goes to haiku when background is haiku', async ($, on) => {
+    world(on, HAIKU, { background: 'haiku' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'claude-sonnet-5-5', agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+  })
+
+  test('a subagent already on the background tier keeps its model and effort', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'us.anthropic.claude-sonnet-5-5', effort: 'high', agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: 'us.anthropic.claude-sonnet-5-5', effort: 'high' }])
+  })
+
+  test('subagents leave unrecognised model ids unchanged', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'custom.claude-opus-5-5', agentId: 'sub-1' })
+    expect(sent).toEqual([{ model: 'custom.claude-opus-5-5', effort: STEP.effort }])
   })
 })

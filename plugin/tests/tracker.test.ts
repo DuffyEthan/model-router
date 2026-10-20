@@ -297,7 +297,7 @@ describe('/router stats and export', () => {
     world(on, HAIKU)
     await start($)
     expect((await router($, 'banana')).text).toBe(
-      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|export [path]]',
+      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]',
     )
   })
 })
@@ -341,6 +341,87 @@ describe('routing log: floor', () => {
     const text = (await router($, 'stats')).text
     expect(text).toContain('No records yet.')
     expect(text).toContain('Floor: haiku')
+  })
+})
+
+describe('routing log: background', () => {
+  test('a prompt routed to background tier logs tier, effort, and backgroundTier', async ($, on) => {
+    const { store } = world(on, HAIKU, { background: 'sonnet' })
+    await start($)
+    await submit($, 'Background task finished', { origin: { kind: 'task-notification' } })
+    expect(prompts(store)[0]).toMatchObject({
+      tier: 'sonnet',
+      effort: 'medium',
+      outcome: 'skipped',
+      backgroundTier: 'sonnet',
+      origin: 'other',
+      originKind: 'task-notification',
+      latencyMs: null,
+    })
+    expect('skip' in (prompts(store)[0] ?? {})).toBe(false)
+  })
+
+  test('a prompt with background=session does not log backgroundTier', async ($, on) => {
+    const { store } = world(on, HAIKU, { background: 'session' })
+    await start($)
+    await submit($, 'Background task finished', { origin: { kind: 'task-notification' } })
+    expect(prompts(store)[0]).toMatchObject({ tier: 'session', effort: 'session', outcome: 'skipped', skip: 'non-user' })
+    expect('backgroundTier' in (prompts(store)[0] ?? {})).toBe(false)
+  })
+
+  test('a user prompt never logs backgroundTier', async ($, on) => {
+    const { store } = world(on, HAIKU, { background: 'sonnet' })
+    await start($)
+    await submit($, 'what does ls -la do')
+    expect(prompts(store)[0]).toMatchObject({ tier: 'haiku', outcome: 'ok' })
+    expect('backgroundTier' in (prompts(store)[0] ?? {})).toBe(false)
+  })
+
+  test('a classifier reason of "background" does not log backgroundTier', async ($, on) => {
+    const { store } = world(on, '{"model":"haiku","effort":"low","reason":"background"}', { background: 'sonnet' })
+    await start($)
+    await submit($, 'what does ls -la do')
+    expect(prompts(store)[0]).toMatchObject({ tier: 'haiku', outcome: 'ok' })
+    expect('backgroundTier' in (prompts(store)[0] ?? {})).toBe(false)
+  })
+
+  test('/router background saves the setting in the store; a bad one writes nothing', async ($, on) => {
+    const { store } = world(on, HAIKU)
+    await start($)
+    await router($, 'background sonnet')
+    expect(store.data.background).toBe('sonnet')
+    await router($, 'background banana')
+    expect(store.data.background).toBe('sonnet')
+    await router($, 'background opus')
+    expect(store.data.background).toBe('sonnet')
+    await router($, 'background haiku')
+    expect(store.data.background).toBe('haiku')
+    await router($, 'background session')
+    expect(store.data.background).toBe('session')
+  })
+
+  test('stats shows the current background setting', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet' })
+    await start($)
+    expect((await router($, 'stats')).text).toContain('\nBackground: sonnet')
+  })
+
+  test('stats on an empty log still shows the background setting', async ($, on) => {
+    world(on, HAIKU)
+    await start($)
+    const text = (await router($, 'stats')).text
+    expect(text).toContain('No records yet.')
+    expect(text).toContain('Background: session')
+  })
+
+  test('stats reports background routed prompts count and tier breakdown', async ($, on) => {
+    const { store } = world(on, HAIKU, { background: 'sonnet' })
+    await start($)
+    await submit($, 'Task 1', { origin: { kind: 'task-notification' } })
+    await router($, 'background haiku')
+    await submit($, 'Task 2', { origin: { kind: 'peer' } })
+    const text = (await router($, 'stats')).text
+    expect(text).toContain('Background routed: 2 (haiku 1, sonnet 1)')
   })
 })
 
