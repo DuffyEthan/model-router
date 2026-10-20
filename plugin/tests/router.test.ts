@@ -806,8 +806,9 @@ function prices(on: On, text = PRICES_JSON) {
 }
 
 // Like captureStep, but every response reports `prompt` tokens of usage (mostly cache
-// reads) from the model the request named; `prompt` null reports no usage.
-function captureUsage(on: On, prompt: () => number | null) {
+// reads) from the model the request named; `prompt` null reports no usage. `extra`'s
+// fields are added to or replace that usage's.
+function captureUsage(on: On, prompt: () => number | null, extra: () => Record<string, unknown> = () => ({})) {
   const sent: { model: string; effort?: unknown }[] = []
   on('turn.step', async function* (_$, e) {
     sent.push({ model: e.model, effort: e.effort })
@@ -815,7 +816,10 @@ function captureUsage(on: On, prompt: () => number | null) {
     const usage =
       n === null
         ? null
-        : { model: e.model, input_tokens: 10, cache_read_input_tokens: n - 10, cache_creation_input_tokens: 0, output_tokens: 500 }
+        : {
+            model: e.model, input_tokens: 10, cache_read_input_tokens: n - 10, cache_creation_input_tokens: 0, output_tokens: 500,
+            ...extra(),
+          }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
   })
   return sent
@@ -932,6 +936,68 @@ describe('sticky routing', () => {
     await submit($, 'hi')
     await step($)
     expect(sent[3]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
+  })
+
+  // The pick 20 or 70 minutes after an Opus request, given how that request wrote cache.
+  for (const [writes, minutes, want] of [
+    ['1h', 20, 'claude-opus-5-5'],
+    ['5m', 20, 'claude-haiku-5-5'],
+    ['1h', 70, 'claude-haiku-5-5'],
+  ] as const) {
+    test(`a ${writes} cache writer ${minutes} minutes later: the pick ${want.includes('opus') ? 'is kept' : 'switches'}`, async ($, on) => {
+      world(on, sequence(OPUS, HAIKU))
+      prices(on)
+      const clock = mock.clock(on, { now: 1_000_000 })
+      const split = writes === '1h'
+        ? { ephemeral_1h_input_tokens: 2_000, ephemeral_5m_input_tokens: 0 }
+        : { ephemeral_1h_input_tokens: 0, ephemeral_5m_input_tokens: 2_000 }
+      const sent = captureUsage(on, () => 100_000, () => ({ cache_creation: split }))
+      await start($)
+      await submit($, 'design it')
+      await step($)
+      await clock.advance(minutes * 60_000)
+      await submit($, 'hi')
+      await step($)
+      expect(sent[1]).toEqual({ model: want, effort: 'low' })
+    })
+  }
+
+  test('a warm cache read after five minutes on the same model shows 1-hour cache', async ($, on) => {
+    world(on, sequence(OPUS, OPUS, HAIKU))
+    prices(on)
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const sent = captureUsage(on, () => 100_000) // no raw split: only the reads tell
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await clock.advance(20 * 60_000)
+    await submit($, 'design more') // reads ~100K of Opus cache 20 minutes on
+    await step($)
+    await clock.advance(30 * 60_000)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[2]).toEqual({ model: 'claude-opus-5-5', effort: 'low' })
+  })
+
+  test('a cold read after five minutes leaves the cache at 5 minutes', async ($, on) => {
+    world(on, sequence(OPUS, OPUS, HAIKU))
+    prices(on)
+    const clock = mock.clock(on, { now: 1_000_000 })
+    let n = 0
+    // the second request reads only the ~35K shared prefix of its 100K prompt
+    const sent = captureUsage(on, () => 100_000, () =>
+      (n += 1) === 2 ? { cache_read_input_tokens: 35_000, cache_creation_input_tokens: 64_990 } : {},
+    )
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await clock.advance(20 * 60_000)
+    await submit($, 'design more')
+    await step($)
+    await clock.advance(30 * 60_000)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[2]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
   })
 
   test('/router sticky off switches on every pick; the setting is stored', async ($, on) => {

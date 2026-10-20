@@ -154,10 +154,12 @@ The prompt cache is per model. Every main-thread request already carries about 3
 
 With `/router sticky on` (the default), when the classifier picks a tier cheaper than the one the main thread last ran on, the router compares the two:
 
-- **Switch cost:** the context × the target's 5-minute cache-write price, plus the context × the warm model's cache-write price for the return.
+- **Switch cost:** the context × the target's cache-write price, plus the context × the warm model's cache-write price for the return. Writes are priced at the 5-minute rate, or the 1-hour rate once the session shows it writes 1-hour cache.
 - **Saving:** what an assumed turn (3 requests, 5K new input tokens, 2K output tokens) costs on the warm model, minus what it costs on the cheaper one.
 
-If the switch costs more, the turn stays on the warm model at the classifier's effort. The context size and model come from the usage the API reported for the main thread's last request, not from an estimate. Prices come from [`prices.json`](plugin/hooks/prices.json), including Haiku's long-context rates above 100K tokens. Escalations are never held back. Nothing is held back when the warm model last answered more than five minutes ago (its cache has expired), after a compaction, or when the last request reported no usage.
+If the switch costs more, the turn stays on the warm model at the classifier's effort. The context size and model come from the usage the API reported for the main thread's last request, not from an estimate. Prices come from [`prices.json`](plugin/hooks/prices.json), including Haiku's long-context rates above 100K tokens. Escalations are never held back. Nothing is held back when the warm model's cache has expired (it last answered more than five minutes ago, or more than an hour ago in a session that writes 1-hour cache), after a compaction, or when the last request reported no usage.
+
+Claude Code writes 5-minute or 1-hour cache. The router treats a session as writing 1-hour cache once a main-thread request reports 1-hour cache writes, or once a request sent more than five minutes after the previous one, on the same model, reads at least 80% of that request's prompt from cache. Until then it assumes 5 minutes.
 
 At current prices, staying wins above about 5K tokens of context for Opus → Sonnet, 14K for Opus → Haiku and 14K for Sonnet → Haiku. Every real request is larger than that, so in practice a session with a warm cache only moves up. `/router status` shows a held-back pick as `kept on opus: switch to haiku would cost more` with both estimates, and `/router stats` counts them. Background routes and subagents are not affected. `/router sticky off` switches on every pick, as before. The setting is remembered across sessions.
 
