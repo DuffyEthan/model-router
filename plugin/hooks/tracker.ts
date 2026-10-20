@@ -34,6 +34,7 @@ export type PromptRecord = {
   originKind: string // PromptOrigin.kind as the engine stamped it ('none' when absent)
   midTurn: boolean // prompt.submit carried a turnId: typed over / delivered into a running turn
   floored?: true // the classifier picked a tier below /router floor; `tier` is the floor
+  sticky?: true // the classifier picked a cheaper tier, but switching would cost more; `tier` is the warm model
   backgroundTier?: Tier // the prompt ran on the background tier setting
   usage?: ClassifierUsage // the classifier call's own tokens, when it reported them
 }
@@ -140,6 +141,8 @@ export function formatStats(log: readonly LogRecord[], price: HaikuPrice | undef
   for (const r of bg) bgTiers[r.backgroundTier as Tier] += 1
   const bgDetail = Object.entries(bgTiers).filter(([, n]) => n > 0).map(([t, n]) => `${t} ${n}`).join(', ')
   lines.push(`Background routed: ${bg.length}` + (bgDetail ? ` (${bgDetail})` : ''))
+  const kept = prompts.filter(r => r.sticky).length
+  lines.push(`Kept on the warm model (switch would cost more): ${kept} (${pct(kept, routed.length)} of routed)`)
 
   const outcomes = { ok: 0, failed: 0, timeout: 0, skipped: 0 }
   for (const r of prompts) outcomes[r.outcome] = (outcomes[r.outcome] ?? 0) + 1

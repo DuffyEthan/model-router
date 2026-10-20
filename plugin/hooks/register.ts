@@ -1,4 +1,4 @@
-import type { EngineInterface, ModelEffort, PromptOrigin, Register } from 'claude-code'
+import type { EngineInterface, ModelEffort, PromptOrigin, Register, TurnUsage } from 'claude-code'
 import {
   appendCapped,
   asLog,
@@ -14,21 +14,34 @@ import {
   type PromptRecord,
   type SkipReason,
 } from './tracker'
+import { switchCost, tierPrices, type TierPrices } from './switch'
 
 type Tier = 'haiku' | 'sonnet' | 'opus'
 type BackgroundTier = 'session' | 'sonnet' | 'haiku'
 // `raisedFrom`: the tier the classifier picked when the floor raised it.
 // `background`: the route came from the /router background setting, not the classifier.
-type Route = { model: Tier; effort: ModelEffort; reason: string; raisedFrom?: Tier; background?: true }
+// `kept`: the route stayed on the model the main thread last ran on because switching to
+// `from` would have cost more (`cost`, USD) than the turn saved (`saving`).
+type Route = {
+  model: Tier
+  effort: ModelEffort
+  reason: string
+  raisedFrom?: Tier
+  background?: true
+  kept?: { from: Tier; cost: number; saving: number }
+}
 type Classified = { route?: Route; outcome: Exclude<Outcome, 'skipped'>; usage?: ClassifierUsage }
 
 const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus']
 const BACKGROUND_TIERS: readonly BackgroundTier[] = ['session', 'sonnet', 'haiku']
 const CLASSIFIER_TIMEOUT_MS = 20000
-const USAGE = 'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]'
+const USAGE =
+  'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]'
 const EFFORTS: readonly ModelEffort[] = ['low', 'medium', 'high', 'xhigh']
 const DEFAULT_FLOOR: Tier = 'haiku' // no floor: every tier can be routed to
 const DEFAULT_BACKGROUND: BackgroundTier = 'session'
+// The prompt cache's default lifetime. A main thread idle longer has no warm cache to keep.
+const CACHE_TTL_MS = 5 * 60_000
 const BACKGROUND_EFFORTS: Record<'sonnet' | 'haiku', ModelEffort> = {
   sonnet: 'medium',
   haiku: 'low',
@@ -88,6 +101,29 @@ function tierOf(current: string): Tier | undefined {
   return TIERS.includes(family as Tier) ? (family as Tier) : undefined
 }
 
+// The main thread's last request as the API reported it: the tier that answered, its
+// prompt size (input + cache reads + cache writes) and when it ended.
+type LastRequest = { tier: Tier; prompt: number; at: number | undefined }
+
+// The last request from a step's reported usage; undefined when the answering model
+// isn't a known tier or the usage counted no prompt.
+function lastRequest(usage: TurnUsage, sent: string, at: number | undefined): LastRequest | undefined {
+  const tier = tierOf(usage.model ?? '') ?? tierOf(sent)
+  const prompt =
+    (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0)
+  return tier && prompt > 0 ? { tier, prompt, at } : undefined
+}
+
+// A route to a tier cheaper than the one the main thread last ran on, kept on that warm
+// model while its cache lives and the switch would cost more than the turn saves.
+// A route to the same or a more expensive tier is never changed.
+function keepWarm(r: Route, last: LastRequest, now: number | undefined, prices: TierPrices | null): Route {
+  if (!prices || TIERS.indexOf(r.model) >= TIERS.indexOf(last.tier)) return r
+  if (now !== undefined && last.at !== undefined && now - last.at > CACHE_TTL_MS) return r
+  const { cost, saving } = switchCost(last.prompt, last.tier, r.model, prices)
+  return cost > saving ? { ...r, model: last.tier, kept: { from: r.model, cost, saving } } : r
+}
+
 const SYSTEM = `You are a router. You never answer the user's message. You only decide which Claude model and effort level should answer it, choosing the CHEAPEST option likely to produce a fully correct answer.
 
 Models (cheapest to most expensive):
@@ -105,20 +141,28 @@ Rules:
 Reply with only a JSON object, no prose: {"model": "haiku"|"sonnet"|"opus", "effort": "low"|"medium"|"high"|"xhigh", "reason": "<one short sentence>"}`
 
 export const register: Register = on => {
-  // Module state resets on a hot reload; `enabled`, `floor` and `background` are persisted in $.store.
+  // Module state resets on a hot reload; `enabled`, `floor`, `background` and `sticky`
+  // are persisted in $.store.
   let enabled = true
   let floor: Tier = DEFAULT_FLOOR
   let background: BackgroundTier = DEFAULT_BACKGROUND
+  let sticky = true
   let route: Route | undefined
+  // The main thread's last request as the API reported it: the tier that answered, its
+  // prompt size (input + cache reads + cache writes) and when it ended.
+  let lastMain: LastRequest | undefined
+  let prices: TierPrices | null | undefined // null: prices.json could not be read
   const counts: Record<Tier, number> = { haiku: 0, sonnet: 0, opus: 0 }
 
   on('session.start', async ($, e, next) => {
     enabled = (await $.store.get('enabled')) !== false
     floor = asFloor(await $.store.get('floor'))
     background = asBackground(await $.store.get('background'))
+    sticky = (await $.store.get('sticky')) !== false
     await $.command.register({
       name: 'router',
-      description: 'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]',
+      description:
+        'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]',
     })
     return next(e)
   })
@@ -149,7 +193,7 @@ export const register: Register = on => {
     else if (!text.trim()) skip = 'empty'
     else if (text.trimStart().startsWith('/')) skip = 'slash'
     else {
-      const t0 = await elapsedStart($)
+      const t0 = await nowMs($)
       let c: Classified
       try {
         c = await classify($, text)
@@ -158,6 +202,14 @@ export const register: Register = on => {
       }
       latencyMs = await elapsedSince($, t0)
       route = c.route && applyFloor(c.route, floor)
+      if (route && sticky && lastMain) {
+        try {
+          if (prices === undefined) prices = (await readTierPrices($)) ?? null
+          route = keepWarm(route, lastMain, await nowMs($), prices)
+        } catch {
+          // a failed estimate leaves the classifier's route as it was
+        }
+      }
       outcome = c.outcome
       usage = c.usage
       if (route) {
@@ -183,6 +235,7 @@ export const register: Register = on => {
       originKind: e.origin?.kind ?? 'none',
       midTurn: e.turnId !== undefined,
       ...(route?.raisedFrom ? { floored: true } : {}),
+      ...(route?.kept ? { sticky: true } : {}),
       ...(route?.background ? { backgroundTier: route.model } : {}),
       ...(usage ? { usage } : {}),
     }
@@ -226,30 +279,61 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // Rewrite every main-thread model request of the turn to the routed model.
+  // Rewrite every main-thread model request of the turn to the routed model, and note
+  // what each one cost for the switch-cost check.
   // Downgrade subagent requests above the background tier to it when configured; a
   // subagent already at or below it (e.g. a Haiku Explore agent) keeps its own model.
   on('turn.step', async function* ($, e, next) {
-    if (!enabled) return yield* next(e)
-
     if (e.agentId !== undefined) {
-      if (background === 'session') return yield* next(e)
+      if (!enabled || background === 'session') return yield* next(e)
       const tier = tierOf(e.model)
       const model = modelId(e.model, background)
       if (!tier || !model || TIERS.indexOf(tier) <= TIERS.indexOf(background)) return yield* next(e)
       return yield* next({ ...e, model, effort: BACKGROUND_EFFORTS[background] })
     }
 
-    if (!route) return yield* next(e)
-    const model = modelId(e.model, route.model)
-    if (!model) return yield* next(e) // unrecognised id format: leave the request alone
-    return yield* next({ ...e, model, effort: route.effort })
+    let req = e
+    if (enabled && route) {
+      const model = modelId(e.model, route.model)
+      if (model) req = { ...e, model, effort: route.effort } // unrecognised id format: leave the request alone
+    }
+    const result = yield* next(req)
+    try {
+      if (result?.usage) lastMain = lastRequest(result.usage, req.model, await nowMs($))
+    } catch {
+      // never let bookkeeping fail the step
+    }
+    return result
+  })
+
+  // A compacted conversation is a new prefix no model has cached: nothing is warm.
+  on('session.compact', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined && e.trigger !== 'precompute' && result.messages) lastMain = undefined
+    return result
   })
 
   on('command.run', { command: 'router' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
     if (arg === 'stats') {
-      return { text: `${formatStats(await readLog($), await readClassifierPrice($))}\nFloor: ${floor}\nBackground: ${background}` }
+      return {
+        text:
+          `${formatStats(await readLog($), await readClassifierPrice($))}\n` +
+          `Floor: ${floor}\nBackground: ${background}\nSticky: ${sticky ? 'on' : 'off'}`,
+      }
+    }
+    if (arg === 'sticky' || arg.startsWith('sticky ')) {
+      const want = arg.slice('sticky'.length).trim()
+      if (want) {
+        if (want !== 'on' && want !== 'off') return { text: USAGE }
+        sticky = want === 'on'
+        await $.store.set('sticky', sticky)
+      }
+      return {
+        text: sticky
+          ? 'Sticky: on (a cheaper pick stays on the warm model when switching would cost more than it saves)'
+          : 'Sticky: off (every pick switches models, whatever the cache)',
+      }
     }
     if (arg === 'floor' || arg.startsWith('floor ')) {
       const want = arg.slice('floor'.length).trim()
@@ -298,12 +382,17 @@ export const register: Register = on => {
       return { text: USAGE }
     }
     const raised = route?.raisedFrom ? ` (raised from ${route.raisedFrom} by the floor)` : ''
-    const last = route ? `${route.model} · ${route.effort} — ${route.reason}${raised}` : 'none yet'
+    const kept = route?.kept
+      ? ` (kept on ${route.model}: switch to ${route.kept.from} would cost more, ` +
+        `~$${route.kept.cost.toFixed(2)} vs ~$${route.kept.saving.toFixed(2)} saved)`
+      : ''
+    const last = route ? `${route.model} · ${route.effort} — ${route.reason}${raised}${kept}` : 'none yet'
     return {
       text: [
         `Model router: ${enabled ? 'on' : 'off'}`,
         `Floor: ${floor}`,
         `Background: ${background}`,
+        `Sticky: ${sticky ? 'on' : 'off'}`,
         `Last route: ${last}`,
         `This session: haiku ${counts.haiku}, sonnet ${counts.sonnet}, opus ${counts.opus}`,
       ].join('\n'),
@@ -326,7 +415,7 @@ function isUserPrompt(origin: PromptOrigin | undefined): boolean {
   }
 }
 
-async function elapsedStart($: EngineInterface): Promise<number | undefined> {
+async function nowMs($: EngineInterface): Promise<number | undefined> {
   try {
     return await $.clock.now()
   } catch {
@@ -435,6 +524,14 @@ async function appendLog($: EngineInterface, record: LogRecord): Promise<void> {
 async function readClassifierPrice($: EngineInterface) {
   try {
     return classifierPrice(await $.fs.read(`${$.plugin.root}/hooks/prices.json`))
+  } catch {
+    return undefined
+  }
+}
+
+async function readTierPrices($: EngineInterface): Promise<TierPrices | undefined> {
+  try {
+    return tierPrices(await $.fs.read(`${$.plugin.root}/hooks/prices.json`), MODEL_IDS)
   } catch {
     return undefined
   }

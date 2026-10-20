@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import { capLog, formatStats, MAX_RECORDS, type LogRecord, type PromptRecord } from '../hooks/tracker'
+import { PRICES_JSON } from './prices'
 
 const STEP = { turnId: 't1', index: 0, model: 'claude-opus-5-5', effort: 'high', messageCount: 3 } as const
 const HAIKU = '{"model":"haiku","effort":"low","reason":"trivial"}'
@@ -41,12 +42,7 @@ function world(on: On, reply: string | (() => unknown), seed: Record<string, unk
   })
   on('fs.read', (_$, e) => {
     if (!e.path.endsWith('/hooks/prices.json')) throw new Error('ENOENT')
-    return {
-      value: JSON.stringify({
-        classifier_model: 'claude-haiku-5-5',
-        models: { 'claude-haiku-5-5': { input: 0.1, cache_write_5m: 0.125, cache_read: 0.01, output: 0.5 } },
-      }),
-    } as never
+    return { value: PRICES_JSON } as never
   })
   on('model.complete', () => {
     if (typeof reply === 'string') return { value: { isAnswered: true, text: reply, usage: USAGE } } as never
@@ -297,7 +293,7 @@ describe('/router stats and export', () => {
     world(on, HAIKU)
     await start($)
     expect((await router($, 'banana')).text).toBe(
-      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]',
+      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]',
     )
   })
 })
@@ -341,6 +337,69 @@ describe('routing log: floor', () => {
     const text = (await router($, 'stats')).text
     expect(text).toContain('No records yet.')
     expect(text).toContain('Floor: haiku')
+  })
+})
+
+describe('routing log: sticky', () => {
+  // Every main-thread response reports a 100K-token prompt from the model it named.
+  function warmSteps(on: On) {
+    on('turn.step', async function* (_$, e) {
+      const usage = { model: e.model, input_tokens: 10, cache_read_input_tokens: 99_990, cache_creation_input_tokens: 0, output_tokens: 1 }
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
+    })
+  }
+  const replies = (...texts: string[]) => {
+    let i = 0
+    return () => ({ isAnswered: true, text: texts[Math.min(i++, texts.length - 1)], usage: USAGE })
+  }
+  const OPUS = '{"model":"opus","effort":"high","reason":"x"}'
+
+  test('a prompt kept on the warm model logs the tier used and sticky: true', async ($, on) => {
+    const { store } = world(on, replies(OPUS, HAIKU))
+    warmSteps(on)
+    await start($)
+    await submit($, 'design the migration')
+    await step($)
+    await submit($, 'what does ls -la do')
+    const [first, second] = prompts(store)
+    expect('sticky' in first!).toBe(false)
+    expect(second).toMatchObject({ tier: 'opus', effort: 'low', outcome: 'ok', sticky: true })
+  })
+
+  test('with sticky off the same prompt switches and carries no sticky field', async ($, on) => {
+    const { store } = world(on, replies(OPUS, HAIKU), { sticky: false })
+    warmSteps(on)
+    await start($)
+    await submit($, 'design the migration')
+    await step($)
+    await submit($, 'what does ls -la do')
+    expect(prompts(store)[1]).toMatchObject({ tier: 'haiku', effort: 'low' })
+    for (const r of prompts(store)) expect('sticky' in r).toBe(false)
+  })
+
+  test('/router sticky saves the setting in the store; a bad one writes nothing', async ($, on) => {
+    const { store } = world(on, HAIKU)
+    await start($)
+    await router($, 'sticky off')
+    expect(store.data.sticky).toBe(false)
+    await router($, 'sticky banana')
+    expect(store.data.sticky).toBe(false)
+    await router($, 'sticky on')
+    expect(store.data.sticky).toBe(true)
+  })
+
+  test('stats counts prompts kept on the warm model and shows the setting', async ($, on) => {
+    const { store } = world(on, replies(OPUS, HAIKU))
+    warmSteps(on)
+    await start($)
+    await submit($, 'design the migration')
+    await step($)
+    await submit($, 'what does ls -la do')
+    await submit($, '/clear')
+    expect(prompts(store)).toHaveLength(3)
+    const text = (await router($, 'stats')).text
+    expect(text).toContain('Kept on the warm model (switch would cost more): 1 (50.0% of routed)')
+    expect(text).toContain('\nSticky: on')
   })
 })
 
