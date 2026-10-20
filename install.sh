@@ -13,8 +13,8 @@ set -eu
 # Update both values together on each release. To get them, run
 #   make release-checksums TAG=vX.Y.Z
 # and paste the output here.
-MR_REF="v0.1.0"
-MR_ROUTE_PY_SHA256="b58e418fc577541abdc39df1ce463538b2cc013f4cb875b5257e6cc310200583"
+MR_REF="v0.2.0"
+MR_ROUTE_PY_SHA256="b2fbd8851e7aa4aa2dc0ec45b635177eee9598946b4a76e9cb6d023ab759a9f2"
 # -------------------------------------------------------------------------------
 
 REPO="DuffyEthan/model-router"
