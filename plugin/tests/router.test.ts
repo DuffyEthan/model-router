@@ -409,7 +409,7 @@ describe('/router floor', () => {
       world(on, HAIKU, { floor: 'sonnet' })
       await start($)
       expect((await router($, args)).text).toBe(
-        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]',
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
       )
       expect((await router($, 'floor')).text).toContain('Floor: sonnet')
     })
@@ -527,11 +527,11 @@ describe('/router background', () => {
     world(on, HAIKU)
     await start($)
     expect((await router($, 'background Sonnet')).text).toBe(
-      'Background: sonnet (background notifications and subagents route to sonnet)',
+      'Background: sonnet · medium (background notifications and subagents route to sonnet)',
     )
     expect((await router($)).text).toContain('Background: sonnet')
     expect((await router($, 'background haiku')).text).toBe(
-      'Background: haiku (background notifications and subagents route to haiku)',
+      'Background: haiku · low (background notifications and subagents route to haiku)',
     )
     expect((await router($)).text).toContain('Background: haiku')
     expect((await router($, 'background session')).text).toBe(
@@ -540,14 +540,68 @@ describe('/router background', () => {
     expect((await router($)).text).toContain('Background: session')
   })
 
-  for (const args of ['background opus', 'background banana', 'background gpt-4', 'background sonnet haiku', 'background 2', 'backgrounds']) {
+  for (const args of [
+    'background opus',
+    'background banana',
+    'background gpt-4',
+    'background sonnet haiku',
+    'background 2',
+    'backgrounds',
+    'background sonnet max',
+    'background sonnet high extra',
+    'background session high',
+    'background high',
+  ]) {
     test(`rejects /router ${args} and keeps the background setting`, async ($, on) => {
       world(on, HAIKU, { background: 'sonnet' })
       await start($)
       expect((await router($, args)).text).toBe(
-        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]',
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
       )
       expect((await router($, 'background')).text).toContain('Background: sonnet')
+    })
+  }
+
+  test('/router background <tier> <effort> sets the effort for background turns and subagents', async ($, on) => {
+    world(on, HAIKU)
+    const sent = captureStep(on)
+    await start($)
+    expect((await router($, 'background sonnet High')).text).toBe(
+      'Background: sonnet · high (background notifications and subagents route to sonnet)',
+    )
+    expect((await router($)).text).toContain('Background: sonnet · high')
+    await submit($, 'Background task finished', { kind: 'task-notification' })
+    await step($)
+    await step($, { model: 'claude-opus-5-5', agentId: 'sub-1' })
+    expect(sent).toEqual([
+      { model: 'claude-sonnet-5-5', effort: 'high' },
+      { model: 'claude-sonnet-5-5', effort: 'high' },
+    ])
+  })
+
+  test('/router background <tier> without an effort resets it to the tier default', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet', backgroundEffort: 'xhigh' })
+    await start($)
+    expect((await router($, 'background')).text).toContain('Background: sonnet · xhigh')
+    expect((await router($, 'background haiku')).text).toContain('Background: haiku · low')
+  })
+
+  test('a subagent at or below the background tier keeps its effort even with one set', async ($, on) => {
+    world(on, HAIKU, { background: 'sonnet', backgroundEffort: 'high' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'claude-haiku-5-5', effort: 'low', agentId: 'sub-explore-1' })
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'low' }])
+  })
+
+  for (const corrupt of ['banana', 'High', '', 3, true, ['high']]) {
+    test(`a stored background effort of ${JSON.stringify(corrupt)} falls back to the tier default`, async ($, on) => {
+      world(on, HAIKU, { background: 'sonnet', backgroundEffort: corrupt })
+      const sent = captureStep(on)
+      await start($)
+      await step($, { model: 'claude-opus-5-5', agentId: 'sub-1' })
+      expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'medium' }])
     })
   }
 

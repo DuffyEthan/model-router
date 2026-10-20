@@ -36,12 +36,13 @@ const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus']
 const BACKGROUND_TIERS: readonly BackgroundTier[] = ['session', 'sonnet', 'haiku']
 const CLASSIFIER_TIMEOUT_MS = 20000
 const USAGE =
-  'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]'
+  'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]'
 const EFFORTS: readonly ModelEffort[] = ['low', 'medium', 'high', 'xhigh']
 const DEFAULT_FLOOR: Tier = 'haiku' // no floor: every tier can be routed to
 const DEFAULT_BACKGROUND: BackgroundTier = 'session'
 // The prompt cache's default lifetime. A main thread idle longer has no warm cache to keep.
 const CACHE_TTL_MS = 5 * 60_000
+// The effort a background route runs at unless `/router background <tier> <effort>` set one.
 const BACKGROUND_EFFORTS: Record<'sonnet' | 'haiku', ModelEffort> = {
   sonnet: 'medium',
   haiku: 'low',
@@ -54,6 +55,11 @@ function asFloor(v: unknown): Tier {
 
 function asBackground(v: unknown): BackgroundTier {
   return BACKGROUND_TIERS.includes(v as BackgroundTier) ? (v as BackgroundTier) : DEFAULT_BACKGROUND
+}
+
+// The persisted background effort, or undefined (the tier's default) when unset or corrupt.
+function asEffort(v: unknown): ModelEffort | undefined {
+  return EFFORTS.includes(v as ModelEffort) ? (v as ModelEffort) : undefined
 }
 
 // Never route below `floor`. A raised route keeps the classifier's effort when the floor
@@ -141,11 +147,12 @@ Rules:
 Reply with only a JSON object, no prose: {"model": "haiku"|"sonnet"|"opus", "effort": "low"|"medium"|"high"|"xhigh", "reason": "<one short sentence>"}`
 
 export const register: Register = on => {
-  // Module state resets on a hot reload; `enabled`, `floor`, `background` and `sticky`
-  // are persisted in $.store.
+  // Module state resets on a hot reload; `enabled`, `floor`, `background`,
+  // `backgroundEffort` and `sticky` are persisted in $.store.
   let enabled = true
   let floor: Tier = DEFAULT_FLOOR
   let background: BackgroundTier = DEFAULT_BACKGROUND
+  let backgroundEffort: ModelEffort | undefined // undefined: BACKGROUND_EFFORTS[background]
   let sticky = true
   let route: Route | undefined
   // The main thread's last request as the API reported it: the tier that answered, its
@@ -153,16 +160,19 @@ export const register: Register = on => {
   let lastMain: LastRequest | undefined
   let prices: TierPrices | null | undefined // null: prices.json could not be read
   const counts: Record<Tier, number> = { haiku: 0, sonnet: 0, opus: 0 }
+  const bgEffort = (tier: 'sonnet' | 'haiku') => backgroundEffort ?? BACKGROUND_EFFORTS[tier]
+  const bgLabel = () => (background === 'session' ? 'session' : `${background} · ${bgEffort(background)}`)
 
   on('session.start', async ($, e, next) => {
     enabled = (await $.store.get('enabled')) !== false
     floor = asFloor(await $.store.get('floor'))
     background = asBackground(await $.store.get('background'))
+    backgroundEffort = asEffort(await $.store.get('backgroundEffort'))
     sticky = (await $.store.get('sticky')) !== false
     await $.command.register({
       name: 'router',
       description:
-        'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]',
+        'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
     })
     return next(e)
   })
@@ -182,7 +192,7 @@ export const register: Register = on => {
     if (!enabled) skip = 'off'
     else if (!isUser) {
       if (background !== 'session') {
-        const effort = BACKGROUND_EFFORTS[background]
+        const effort = bgEffort(background)
         route = { model: background, effort, reason: 'background', background: true }
         counts[background] += 1
         $.ui.status(`router → ${background} · ${effort}`)
@@ -289,7 +299,7 @@ export const register: Register = on => {
       const tier = tierOf(e.model)
       const model = modelId(e.model, background)
       if (!tier || !model || TIERS.indexOf(tier) <= TIERS.indexOf(background)) return yield* next(e)
-      return yield* next({ ...e, model, effort: BACKGROUND_EFFORTS[background] })
+      return yield* next({ ...e, model, effort: bgEffort(background) })
     }
 
     let req = e
@@ -319,7 +329,7 @@ export const register: Register = on => {
       return {
         text:
           `${formatStats(await readLog($), await readClassifierPrice($))}\n` +
-          `Floor: ${floor}\nBackground: ${background}\nSticky: ${sticky ? 'on' : 'off'}`,
+          `Floor: ${floor}\nBackground: ${bgLabel()}\nSticky: ${sticky ? 'on' : 'off'}`,
       }
     }
     if (arg === 'sticky' || arg.startsWith('sticky ')) {
@@ -345,13 +355,20 @@ export const register: Register = on => {
       return { text: `Floor: ${floor} (the router never picks a model below ${floor})` }
     }
     if (arg === 'background' || arg.startsWith('background ')) {
-      const want = arg.slice('background'.length).trim()
-      if (want) {
-        if (!BACKGROUND_TIERS.includes(want as BackgroundTier)) return { text: USAGE }
-        background = want as BackgroundTier
+      const want = arg.slice('background'.length).trim().split(/\s+/).filter(Boolean)
+      if (want.length) {
+        // A tier, then optionally an effort; no effort resets it to the tier's default.
+        const [tier, effort] = want
+        if (want.length > 2 || !BACKGROUND_TIERS.includes(tier as BackgroundTier)) return { text: USAGE }
+        if (effort !== undefined && (tier === 'session' || !EFFORTS.includes(effort as ModelEffort))) {
+          return { text: USAGE }
+        }
+        background = tier as BackgroundTier
+        backgroundEffort = effort as ModelEffort | undefined
         await $.store.set('background', background)
+        await $.store.set('backgroundEffort', backgroundEffort ?? null)
       }
-      return { text: `Background: ${background} (background notifications and subagents route to ${background})` }
+      return { text: `Background: ${bgLabel()} (background notifications and subagents route to ${background})` }
     }
     if (arg === 'export' || arg.startsWith('export ')) {
       try {
@@ -391,7 +408,7 @@ export const register: Register = on => {
       text: [
         `Model router: ${enabled ? 'on' : 'off'}`,
         `Floor: ${floor}`,
-        `Background: ${background}`,
+        `Background: ${bgLabel()}`,
         `Sticky: ${sticky ? 'on' : 'off'}`,
         `Last route: ${last}`,
         `This session: haiku ${counts.haiku}, sonnet ${counts.sonnet}, opus ${counts.opus}`,
