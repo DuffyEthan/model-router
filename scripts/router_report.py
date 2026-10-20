@@ -12,14 +12,21 @@ Joins the model-router plugin's routing log with Claude Code's session transcrip
     cache);
   * net savings, with the switch cache penalty and the classifier overhead on lines of
     their own;
+  * spend by source (main thread or subagent) and by the route of the prompt each
+    request belongs to;
   * the override rate (/model changes and /router off per user prompt), a rough quality
-    proxy only.
+    proxy only;
+  * with --simulate, the same requests re-priced under other routing policies.
+
+Requests from before a session's first routing-log record are counted apart ("before
+routing log") and left out of the other figures.
 
 Stdlib only, Python 3.9+. Prices come from plugin/hooks/prices.json, the one price table
 the plugin's /router stats reads too. Nothing here reads or prints message content.
 """
 
 import argparse
+import bisect
 import datetime as dt
 import glob
 import json
@@ -27,13 +34,15 @@ import os
 import re
 import sys
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PRICES = os.path.join(HERE, os.pardir, "plugin", "hooks", "prices.json")
 MTOK = 1_000_000.0
 TTL_5M = 5 * 60
 TTL_1H = 60 * 60
+# The model each routing tier runs on.
+TIER_MODELS = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +233,22 @@ def read_requests(projects_dir: str, stats: Dict[str, int]) -> List[Dict[str, An
     return out
 
 
+def request_chains(requests: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Requests grouped by chain (a transcript file's main thread, or one subagent), each
+    in time order."""
+    chains: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+    for r in requests:
+        chains[(r["file"], r["chain"])].append(r)
+    for chain in chains.values():
+        chain.sort(key=lambda r: r["ts"])
+    return list(chains.values())
+
+
+def held_context(t: Dict[str, float]) -> float:
+    """The prefix a request leaves in the cache: input + cache reads + cache writes + output."""
+    return t["input"] + t["cache_read"] + t["cw5m"] + t["cw1h"] + t["output"]
+
+
 def mark_switches(requests: List[Dict[str, Any]]) -> None:
     """Sets r["switch_reads"]: cache-write tokens of r that an unbroken Opus session would
     have read from the cache instead.
@@ -236,11 +261,7 @@ def mark_switches(requests: List[Dict[str, Any]]) -> None:
     used (5 minutes, or 1 hour when it wrote 1-hour cache). The rest of the write is new
     content, a write either way.
     """
-    chains: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-    for r in requests:
-        chains[(r["file"], r["chain"])].append(r)
-    for chain in chains.values():
-        chain.sort(key=lambda r: r["ts"])
+    for chain in request_chains(requests):
         prev = None
         for r in chain:
             r["switch_reads"] = 0
@@ -250,9 +271,7 @@ def mark_switches(requests: List[Dict[str, Any]]) -> None:
                 ttl = TTL_1H if t["cw1h"] else TTL_5M
                 gap = (r["ts"] - prev["ts"]).total_seconds()
                 if gap <= ttl:
-                    p = prev["tokens"]
-                    held = p["input"] + p["cache_read"] + p["cw5m"] + p["cw1h"] + p["output"]
-                    r["switch_reads"] = min(cw, held)
+                    r["switch_reads"] = min(cw, held_context(prev["tokens"]))
             prev = r
 
 
@@ -314,6 +333,175 @@ def read_log(paths: Iterable[str], stats: Dict[str, int]) -> List[Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
+# Attribution: which prompt each request belongs to
+
+BEFORE_FIRST_PROMPT = "before first prompt"
+NOT_LOGGED = "session not in routing log"
+
+
+def attribute(requests: List[Dict[str, Any]], log: List[Dict[str, Any]]) -> None:
+    """Sets r["prompt"] (the routing-log prompt record r belongs to, or None) and
+    r["before_log"] (r came before its session's first routing-log record).
+
+    A main-thread request belongs to the latest prompt in its session with ts <= the
+    request's. A subagent belongs to the prompt its first request falls under, so every
+    request of a subagent counts towards the prompt that started it. Sessions with no
+    routing-log records at all are neither: r["logged"] is False.
+    """
+    first: Dict[str, dt.datetime] = {}
+    prompts: Dict[str, List[Tuple[dt.datetime, Dict[str, Any]]]] = defaultdict(list)
+    for rec in log:
+        s, t = rec.get("session"), parse_ts(rec.get("ts"))
+        if not s or t is None:
+            continue
+        if s not in first or t < first[s]:
+            first[s] = t
+        if rec.get("kind") == "prompt":
+            prompts[s].append((t, rec))
+    for ps in prompts.values():
+        ps.sort(key=lambda p: p[0])
+    times = {s: [p[0] for p in ps] for s, ps in prompts.items()}
+
+    def prompt_at(session: str, t: dt.datetime) -> Optional[Dict[str, Any]]:
+        i = bisect.bisect_right(times.get(session, []), t)
+        return prompts[session][i - 1][1] if i else None
+
+    for chain in request_chains(requests):
+        start = chain[0]["ts"]
+        for r in chain:
+            s = r["session"]
+            r["logged"] = s in first
+            r["before_log"] = s in first and r["ts"] < first[s]
+            r["prompt"] = prompt_at(s, start if r["chain"] else r["ts"])
+
+
+def route_bucket(r: Dict[str, Any]) -> str:
+    """The route of the prompt r belongs to: a tier it was routed to, or why it wasn't."""
+    p = r.get("prompt")
+    if p is None:
+        return BEFORE_FIRST_PROMPT if r.get("logged") else NOT_LOGGED
+    tier = p.get("tier")
+    if tier in TIER_MODELS:
+        return f"background → {tier}" if p.get("backgroundTier") else tier
+    if p.get("skip") == "non-user":
+        return f"unrouted: {p.get('originKind')}"
+    if p.get("skip"):
+        return f"unrouted: {p.get('skip')}"
+    return f"unrouted: classifier {p.get('outcome')}"
+
+
+def _bucket_order(b: str) -> Tuple[int, str]:
+    fixed = ["haiku", "sonnet", "opus"]
+    if b in fixed:
+        return (0, str(fixed.index(b)))
+    if b.startswith("background"):
+        return (1, b)
+    if b.startswith("unrouted"):
+        return (2, b)
+    return (3, b)
+
+
+# ---------------------------------------------------------------------------
+# Simulation: the same requests re-priced under another routing policy
+
+
+def _routed_tier(r: Dict[str, Any]) -> Optional[str]:
+    """The tier the classifier picked for r's prompt (not a background route), if any."""
+    p = r.get("prompt")
+    if r["chain"] or p is None or p.get("backgroundTier"):
+        return None
+    tier = p.get("tier")
+    return tier if tier in TIER_MODELS else None
+
+
+def _non_user(r: Dict[str, Any]) -> bool:
+    p = r.get("prompt")
+    return p is not None and (p.get("origin") == "other" or p.get("skip") == "non-user" or bool(p.get("backgroundTier")))
+
+
+def _sonnet_first(floor: str) -> Callable[[Dict[str, Any]], Optional[str]]:
+    def pick(r: Dict[str, Any]) -> Optional[str]:
+        tier = _routed_tier(r)
+        if tier is None:
+            return TIER_MODELS["sonnet"]
+        order = list(TIER_MODELS)
+        return TIER_MODELS[order[max(order.index(tier), order.index(floor))]]
+    return pick
+
+
+# Each policy maps a request (with its prompt attributed) to the model it would have run
+# on, or None for the model it actually ran on.
+POLICIES: Dict[str, Callable[[Dict[str, Any]], Optional[str]]] = {
+    "observed": lambda r: None,
+    "opus-only": lambda r: TIER_MODELS["opus"],
+    "sonnet-only": lambda r: TIER_MODELS["sonnet"],
+    # Routed prompts keep their tier; unrouted prompts and subagents run on Sonnet.
+    "sonnet-first": _sonnet_first("haiku"),
+    "sonnet-first-floor": _sonnet_first("sonnet"),
+    # Subagents and prompts that aren't the person's own on Sonnet; the rest as observed.
+    "background-sonnet": lambda r: TIER_MODELS["sonnet"] if r["chain"] or _non_user(r) else None,
+}
+# Policies that run the classifier, so its overhead counts against their savings.
+CLASSIFIED = {"observed", "sonnet-first", "sonnet-first-floor", "background-sonnet"}
+
+
+def simulate(
+    requests: List[Dict[str, Any]],
+    prices: Dict[str, Any],
+    pick: Callable[[Dict[str, Any]], Optional[str]],
+    counted: Callable[[Dict[str, Any]], bool],
+) -> Dict[str, Any]:
+    """Re-prices requests as if each had run on pick(r), with the cache re-modelled.
+
+    Each chain tracks, per model, when it last ran and the context it left in the cache
+    (input + cache reads + cache writes + output). A request's cached tokens (its observed
+    reads plus writes) are read up to that held context when the model's cache is still
+    warm, and written otherwise. Warm means within 5 minutes, or 1 hour when the chain
+    writes 1-hour cache. The first request of a chain keeps its observed split: its reads
+    came from outside the chain (the shared system prompt and tools, or a resumed
+    session). That shared prefix is taken to stay warm on any model, so a request whose
+    model's cache went cold still reads up to the first request's reads: in real
+    transcripts a switch back to a model after an hour away still read the ~40K-token
+    system prompt.
+
+    Every request moves the cache along; only those where counted(r) add to the result.
+    Returns {"usd", "requests", "switches"}: switches counts counted requests whose
+    model differs from the one before it in its chain.
+    """
+    us_mult = prices.get("us_inference_multiplier", 1.0)
+    usd = 0.0
+    n = switches = 0
+    for chain in request_chains(requests):
+        ttl = TTL_1H if any(r["tokens"]["cw1h"] for r in chain) else TTL_5M
+        held: Dict[str, Tuple[dt.datetime, float]] = {}
+        shared = chain[0]["tokens"]["cache_read"]
+        prev_model = None
+        for i, r in enumerate(chain):
+            t = r["tokens"]
+            model = canonical_model(pick(r) or r["model"])
+            sim = dict(t)
+            if i:
+                cached = t["cache_read"] + t["cw5m"] + t["cw1h"]
+                h = held.get(model)
+                warm = h[1] if h is not None and (r["ts"] - h[0]).total_seconds() <= ttl else 0
+                reads = min(cached, max(warm, shared))
+                writes = cached - reads
+                cw = t["cw5m"] + t["cw1h"]
+                share_1h = t["cw1h"] / cw if cw else (1.0 if ttl == TTL_1H else 0.0)
+                sim.update(cache_read=reads, cw1h=writes * share_1h, cw5m=writes * (1 - share_1h))
+            held[model] = (r["ts"], held_context(t))
+            if counted(r):
+                prompt_tokens = t["input"] + t["cache_read"] + t["cw5m"] + t["cw1h"]
+                rates = rate_card(prices, model, prompt_tokens)
+                if rates is not None:
+                    usd += price_tokens(rates, sim, us_mult if r.get("geo") == "us" else 1.0)
+                    n += 1
+                switches += 1 if prev_model is not None and model != prev_model else 0
+            prev_model = model
+    return {"usd": usd, "requests": n, "switches": switches}
+
+
+# ---------------------------------------------------------------------------
 # Report
 
 
@@ -332,7 +520,10 @@ def build_report(
     lo: Optional[dt.datetime] = None,
     hi: Optional[dt.datetime] = None,
     all_sessions: bool = False,
+    simulate_policies: Iterable[str] = (),
 ) -> Dict[str, Any]:
+    # Attribution sees the whole log, so a request just after `lo` still finds its prompt.
+    attribute(requests, log)
     log = [r for r in log if in_range(parse_ts(r.get("ts")), lo, hi)]
     prompts = [r for r in log if r.get("kind") == "prompt"]
     overrides = [r for r in log if r.get("kind") == "override"]
@@ -344,20 +535,31 @@ def build_report(
     if logged_sessions and not all_sessions:
         reqs = [r for r in reqs if r["session"] in logged_sessions]
         scope = "sessions in the routing log"
+    # Requests before their session's first routing-log record ran before the router was
+    # logging there (often before it was installed): counted apart, not in the savings.
+    before = [r for r in reqs if r.get("before_log")]
+    reqs = [r for r in reqs if not r.get("before_log")]
 
     cf_model = prices["counterfactual_model"]
     us_mult = prices.get("us_inference_multiplier", 1.0)
+
+    def priced(r: Dict[str, Any]) -> Optional[Dict[str, float]]:
+        t = r["tokens"]
+        rates = rate_card(prices, r["model"], t["input"] + t["cache_read"] + t["cw5m"] + t["cw1h"])
+        if rates is not None and r.get("speed") not in (None, "standard"):
+            rates = None  # fast mode is not in the price table
+        return rates
+
     by_model: Dict[str, Dict[str, Any]] = {}
     unpriced: Dict[str, Dict[str, Any]] = {}
+    by_source: Dict[str, Dict[str, Dict[str, Any]]] = {"main": {}, "subagent": {}}
     actual = counterfactual = penalty = 0.0
 
     for r in reqs:
         t = r["tokens"]
         prompt_tokens = t["input"] + t["cache_read"] + t["cw5m"] + t["cw1h"]
         mult = us_mult if r.get("geo") == "us" else 1.0
-        rates = rate_card(prices, r["model"], prompt_tokens)
-        if rates is not None and r.get("speed") not in (None, "standard"):
-            rates = None  # fast mode is not in the price table
+        rates = priced(r)
         name = canonical_model(r["model"])
         if rates is None:
             row = unpriced.setdefault(name, {"requests": 0, "tokens": 0})
@@ -366,6 +568,9 @@ def build_report(
             continue
         cost = price_tokens(rates, t, mult)
         actual += cost
+        src = by_source["subagent" if r["chain"] else "main"].setdefault(route_bucket(r), {"requests": 0, "cost": 0.0})
+        src["requests"] += 1
+        src["cost"] += cost
 
         # Switch penalty: what re-writing the cache cost over reading it, on this model.
         s = r.get("switch_reads", 0)
@@ -419,11 +624,25 @@ def build_report(
         if r.get("origin") == "other":
             other_kinds[str(r.get("originKind"))] += 1
 
+    before_cost = 0.0
+    for r in before:
+        rates = priced(r)
+        if rates is not None:
+            before_cost += price_tokens(rates, r["tokens"], us_mult if r.get("geo") == "us" else 1.0)
+
+    in_scope = {id(r) for r in reqs if priced(r) is not None}
+    simulations = {}
+    for name in simulate_policies:
+        simulations[name] = simulate(requests, prices, POLICIES[name], lambda r: id(r) in in_scope)
+
     priced_requests = sum(m["requests"] for m in by_model.values())
     priced_tokens = sum(total(m["tokens"]) for m in by_model.values())
     return {
         "scope": scope,
         "requests": len(reqs),
+        "before_log": {"requests": len(before), "cost": before_cost},
+        "by_source": by_source,
+        "simulations": simulations,
         "priced_requests": priced_requests,
         "priced_tokens": priced_tokens,
         "by_model": by_model,
@@ -465,6 +684,12 @@ def format_report(rep: Dict[str, Any], stats: Dict[str, int], prices: Dict[str, 
         f"{stats['synthetic']} synthetic messages skipped"
     )
     L.append(f"Scope: {rep['scope']}; {rep['requests']} API requests in range")
+    bl = rep["before_log"]
+    if bl["requests"]:
+        L.append(
+            f"  plus {bl['requests']} before routing log ({_usd(bl['cost'])}): requests before their session's "
+            "first routing-log record, left out of every figure below"
+        )
     if not rep["prompts"]:
         L.append("Routing log: no records in range (prompt shares, classifier overhead and overrides unavailable).")
         L.append(
@@ -509,6 +734,26 @@ def format_report(rep: Dict[str, Any], stats: Dict[str, int], prices: Dict[str, 
         L.append("  (unpriced models are left out of every cost line below)")
     L.append("")
 
+    if rep["priced_requests"]:
+        L.append("Spend by source and route (each request under the prompt it belongs to):")
+        L.append(f"  {'source':<10}{'route':<34}{'requests':>9}{'API-equiv.':>13}{'share':>8}")
+        for source, label_ in (("main", "main"), ("subagent", "subagent")):
+            rows_ = rep["by_source"][source]
+            for bucket, m in sorted(rows_.items(), key=lambda kv: _bucket_order(kv[0])):
+                L.append(
+                    f"  {label_:<10}{bucket:<34}{m['requests']:>9}{_usd(m['cost']):>13}"
+                    f"{_pct(m['cost'], rep['actual_usd']):>8}"
+                )
+            if rows_:
+                n = sum(m["requests"] for m in rows_.values())
+                c = sum(m["cost"] for m in rows_.values())
+                L.append(f"  {'':<10}{'total':<34}{n:>9}{_usd(c):>13}{_pct(c, rep['actual_usd']):>8}")
+        L.append(
+            "  (a main-thread request belongs to the latest prompt in its session at or before it; a subagent"
+        )
+        L.append("  to the prompt its first request falls under)")
+        L.append("")
+
     L.append("Cost at API list prices (API-equivalent: Pro/Max plans do not pay per token):")
     cf_label = prices["models"][prices["counterfactual_model"]]["label"]
     est = " (partly estimated)" if rep["classifier_estimated"] else ""
@@ -526,6 +771,26 @@ def format_report(rep: Dict[str, Any], stats: Dict[str, int], prices: Dict[str, 
     if rep["classifier_usd"] is None and rep["classifier_calls"]:
         L.append("  (classifier overhead unknown: the log has no usage for its calls; net savings exclude it)")
     L.append("")
+
+    sims = rep["simulations"]
+    if sims:
+        base = sims.get("opus-only", {}).get("usd")
+        clf = rep["classifier_usd"] or 0.0
+        L.append("Simulated policies (the same requests re-priced, cache re-modelled per chain and model):")
+        L.append(f"  {'policy':<22}{'API-equiv.':>13}{'savings vs opus-only':>26}{'switches':>10}")
+        for name, s in sims.items():
+            saved = None if base is None else base - s["usd"] - (clf if name in CLASSIFIED else 0.0)
+            pct = f" ({_pct(saved, base).strip()})" if saved is not None else ""
+            L.append(f"  {name:<22}{_usd(s['usd']):>13}{(_usd(saved) + pct) if saved is not None else '—':>26}{s['switches']:>10}")
+        L.append("  (savings include the classifier overhead for policies that run it: observed, sonnet-first*,")
+        L.append("  background-sonnet; the opus-only and sonnet-only rows need no classifier)")
+        if "observed" in sims and rep["actual_usd"]:
+            d = sims["observed"]["usd"] / rep["actual_usd"] - 1
+            L.append(f"  calibration: observed simulates to {d:+.1%} of actual")
+        if base is not None and rep["counterfactual_usd"]:
+            d = base / rep["counterfactual_usd"] - 1
+            L.append(f"  calibration: opus-only simulates to {d:+.1%} of the counterfactual")
+        L.append("")
 
     if rep["prompts"]:
         rate = rep["override_rate"]
@@ -555,8 +820,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     ap.add_argument("--prices", default=DEFAULT_PRICES, help="price table (default: plugin/hooks/prices.json)")
     ap.add_argument("--all-sessions", action="store_true", help="include sessions with no routing-log records")
+    ap.add_argument(
+        "--simulate",
+        action="append",
+        metavar="POLICY",
+        choices=sorted(POLICIES) + ["all"],
+        help="also re-price the same requests under POLICY (repeatable; 'all' for every one): "
+        + ", ".join(POLICIES)
+        + ". observed and opus-only are always added, for calibration and as the baseline",
+    )
     ap.add_argument("--json", action="store_true", help="print the figures as JSON")
     a = ap.parse_args(argv)
+    policies: List[str] = []
+    if a.simulate:
+        want = set(POLICIES) if "all" in a.simulate else set(a.simulate) | {"observed", "opus-only"}
+        policies = [p for p in POLICIES if p in want]
 
     try:
         lo, hi = day_bounds(a.since, a.until)
@@ -568,7 +846,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     stats: Dict[str, int] = defaultdict(int)
     requests = read_requests(projects, stats) if os.path.isdir(projects) else []
     log = read_log(a.log if a.log else default_log_paths(config), stats)
-    rep = build_report(requests, log, prices, lo, hi, a.all_sessions)
+    rep = build_report(requests, log, prices, lo, hi, a.all_sessions, policies)
     if a.json:
         print(json.dumps({**rep, "stats": dict(stats)}, indent=2, sort_keys=True, default=str))
     else:

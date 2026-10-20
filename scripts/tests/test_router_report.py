@@ -193,6 +193,187 @@ class FixtureReport(unittest.TestCase):
         rep, _ = run(logs=[STORE, LOG])
         self.assertEqual(rep["prompts"], 6)
 
+    def test_spend_by_source_and_route(self):
+        # sess-a: a1 under the 10:00 opus prompt; a2, a3 under the 10:01 haiku prompt;
+        # a4 under the 10:03 slash command. sess-b: b1, b2 under the 11:00 prompt whose
+        # classifier timed out; subagent x1 starts at 11:00:20, under the same prompt.
+        rep, _ = run(since="2026-10-01", until="2026-10-01")
+        cost = {src: {b: round(m["cost"] / U, 6) for b, m in rows.items()} for src, rows in rep["by_source"].items()}
+        self.assertEqual(cost, {
+            "main": {"opus": 11400, "haiku": 279.75 + 30.75, "unrouted: slash": 11895,
+                     "unrouted: classifier timeout": 6950 + 560},
+            "subagent": {"unrouted: classifier timeout": 4100},
+        })
+        self.assertAlmostEqual(sum(m["cost"] for rows in rep["by_source"].values() for m in rows.values()),
+                               rep["actual_usd"], places=12)
+        self.assertEqual(rep["before_log"], {"requests": 0, "cost": 0.0})
+        text = rr.format_report(rep, defaultdict(int), PRICES, "x")
+        self.assertIn("Spend by source and route", text)
+        self.assertIn("unrouted: classifier timeout", text)
+
+    def test_simulation_calibrates_on_the_fixtures(self):
+        rep, _ = run(since="2026-10-01", until="2026-10-01", simulate_policies=list(rr.POLICIES))
+        sims = rep["simulations"]
+        self.assertEqual(set(sims), set(rr.POLICIES))
+        self.assertEqual(sims["observed"]["requests"], rep["priced_requests"])
+        # Observed models: a3 and a4 read what a2 and a3 held, including their input and
+        # output, which the transcripts show as writes (a3: 30, a4: 20 of 2215), so the
+        # simulation is slightly cheaper than actual.
+        #   a3  5*0.10 + 2180*0.01 + 10*0.5            = 0.5 + 21.8 + 5   = 27.3   (30.75)
+        #   a4  5*4 + 2215*0.20 + 40*20 -> but Opus last ran at a1 (2150 held, 3 min ago):
+        #       reads 2150, writes 65: 20 + 430 + 325 + 800              = 1575   (11895)
+        # a2 switched to Haiku, which this chain had not run: its 2150 written tokens are
+        # written again (the chain's first request read nothing, so no shared prefix).
+        self.assertAlmostEqual(sims["observed"]["usd"], (A_ACTUAL - 30.75 + 27.3 - 11895 + 1575 + B_ACTUAL) * U, places=12)
+        self.assertEqual(sims["observed"]["switches"], 2)
+        self.assertEqual(sims["opus-only"]["switches"], 0)
+        self.assertLess(sims["sonnet-only"]["usd"], sims["opus-only"]["usd"])
+
+
+class Attribution(unittest.TestCase):
+    T0 = "2026-10-01T10:00:00Z"
+
+    @staticmethod
+    def req(i, ts, model="claude-opus-5-5", chain="", session="s", file="f", tokens=None):
+        return {"id": i, "file": file, "session": session, "chain": chain, "model": model,
+                "ts": rr.parse_ts(ts), "geo": None, "speed": "standard",
+                "tokens": tokens or {"input": 1000, "cw5m": 0, "cw1h": 0, "cache_read": 0, "output": 0}}
+
+    @staticmethod
+    def prompt(ts, tier="session", session="s", **kw):
+        return {"kind": "prompt", "ts": ts, "session": session, "tier": tier, **kw}
+
+    def test_requests_belong_to_the_latest_prompt_at_or_before_them(self):
+        log = [self.prompt("2026-10-01T10:00:00Z", "haiku", origin="user"),
+               self.prompt("2026-10-01T10:05:00Z", "opus", origin="user")]
+        reqs = [self.req("m1", "2026-10-01T10:00:00Z"),  # same instant: belongs to it
+                self.req("m2", "2026-10-01T10:04:59Z"),
+                self.req("m3", "2026-10-01T10:05:01Z"),
+                # A subagent started under the haiku prompt stays with it after 10:05.
+                self.req("s1", "2026-10-01T10:04:00Z", chain="a1", file="g"),
+                self.req("s2", "2026-10-01T10:06:00Z", chain="a1", file="g")]
+        rr.attribute(reqs, log)
+        self.assertEqual([r["prompt"]["tier"] for r in reqs], ["haiku", "haiku", "opus", "haiku", "haiku"])
+        self.assertFalse(any(r["before_log"] for r in reqs))
+
+    def test_route_buckets(self):
+        log = [{"kind": "override", "ts": "2026-10-01T09:59:00Z", "session": "s", "action": "router-off"},
+               self.prompt("2026-10-01T10:01:00Z", "sonnet", origin="user"),
+               self.prompt("2026-10-01T10:02:00Z", "sonnet", origin="other", backgroundTier="sonnet"),
+               self.prompt("2026-10-01T10:03:00Z", skip="non-user", origin="other", originKind="peer"),
+               self.prompt("2026-10-01T10:04:00Z", skip="off", origin="user"),
+               self.prompt("2026-10-01T10:05:00Z", outcome="failed", origin="user")]
+        reqs = [self.req(str(i), f"2026-10-01T10:0{i}:30Z") for i in range(6)]
+        reqs.append(self.req("x", "2026-10-01T10:00:00Z", session="other", file="h"))
+        rr.attribute(reqs, log)
+        self.assertEqual([rr.route_bucket(r) for r in reqs], [
+            rr.BEFORE_FIRST_PROMPT, "sonnet", "background → sonnet", "unrouted: peer",
+            "unrouted: off", "unrouted: classifier failed", rr.NOT_LOGGED])
+
+    def test_requests_before_the_routing_log_are_counted_apart(self):
+        log = [self.prompt("2026-10-01T10:00:00Z", "haiku", origin="user")]
+        reqs = [self.req("early", "2026-10-01T09:00:00Z"), self.req("late", "2026-10-01T10:00:10Z")]
+        rep = rr.build_report(reqs, log, PRICES)
+        self.assertEqual(rep["requests"], 1)
+        self.assertEqual(rep["before_log"]["requests"], 1)
+        self.assertAlmostEqual(rep["before_log"]["cost"], 4000 * U, places=12)
+        self.assertAlmostEqual(rep["actual_usd"], 4000 * U, places=12)
+        self.assertAlmostEqual(rep["counterfactual_usd"], 4000 * U, places=12)
+        text = rr.format_report(rep, defaultdict(int), PRICES, "x")
+        self.assertIn("1 before routing log ($0.0040)", text)
+        # A log record before `lo` still marks the session's start and finds the prompt.
+        rep = rr.build_report(reqs, log, PRICES, *rr.day_bounds("2026-10-02", None))
+        self.assertEqual(rep["requests"], 0)
+
+    def test_policy_picks(self):
+        user_haiku = {"prompt": self.prompt(self.T0, "haiku", origin="user"), "chain": ""}
+        user_opus = {"prompt": self.prompt(self.T0, "opus", origin="user"), "chain": ""}
+        unrouted = {"prompt": self.prompt(self.T0, skip="off", origin="user"), "chain": ""}
+        peer = {"prompt": self.prompt(self.T0, skip="non-user", origin="other", originKind="peer"), "chain": ""}
+        sub = {"prompt": self.prompt(self.T0, "haiku", origin="user"), "chain": "a1"}
+        none = {"prompt": None, "chain": ""}
+        haiku, sonnet, opus = (rr.TIER_MODELS[t] for t in ("haiku", "sonnet", "opus"))
+        want = {
+            "observed": [None, None, None, None, None, None],
+            "opus-only": [opus] * 6,
+            "sonnet-only": [sonnet] * 6,
+            "sonnet-first": [haiku, opus, sonnet, sonnet, sonnet, sonnet],
+            "sonnet-first-floor": [sonnet, opus, sonnet, sonnet, sonnet, sonnet],
+            "background-sonnet": [None, None, None, sonnet, sonnet, None],
+        }
+        for name, models in want.items():
+            got = [rr.POLICIES[name](r) for r in (user_haiku, user_opus, unrouted, peer, sub, none)]
+            self.assertEqual(got, models, name)
+
+
+class Simulation(unittest.TestCase):
+    """One main-thread chain, worked by hand (5-minute cache):
+
+      q1  t=0     Opus  in 100, read 500,  5m write 1000, out 100  -> holds 1700
+      q2  t=60s   Opus  in 10,  read 1700, 5m write 50,   out 10   -> holds 1770
+      q3  t=120s  Opus  in 5,   read 1770, 5m write 30,   out 5    -> holds 1810
+      q4  t=520s  Opus  in 5,   read 0,    5m write 1830, out 5    (cache expired)
+
+    q1 read 500 from outside the chain: the shared prefix, warm on any model.
+    """
+
+    def chain(self):
+        def req(i, s, cr, cw, inp, out):
+            return {"id": i, "file": "f", "session": "s", "chain": "", "model": "claude-opus-5-5",
+                    "ts": rr.parse_ts("2026-10-01T10:00:00Z") + rr.dt.timedelta(seconds=s), "geo": None,
+                    "speed": "standard", "tokens": {"input": inp, "cw5m": cw, "cw1h": 0, "cache_read": cr, "output": out}}
+        return [req("q1", 0, 500, 1000, 100, 100), req("q2", 60, 1700, 50, 10, 10),
+                req("q3", 120, 1770, 30, 5, 5), req("q4", 520, 0, 1830, 5, 5)]
+
+    def test_observed_models(self):
+        # q1-q3 keep their split; q4's Opus cache went cold, but the shared 500 is read:
+        #   q1 100*4 + 500*0.2 + 1000*5 + 100*20 = 400 + 100 + 5000 + 2000  = 7500
+        #   q2 10*4 + 1700*0.2 + 50*5 + 10*20    = 40 + 340 + 250 + 200     = 830
+        #   q3 5*4 + 1770*0.2 + 30*5 + 5*20      = 20 + 354 + 150 + 100     = 624
+        #   q4 5*4 + 500*0.2 + 1330*5 + 5*20     = 20 + 100 + 6650 + 100    = 6870
+        s = rr.simulate(self.chain(), PRICES, rr.POLICIES["observed"], lambda r: True)
+        self.assertAlmostEqual(s["usd"], (7500 + 830 + 624 + 6870) * U, places=12)
+        self.assertEqual((s["requests"], s["switches"]), (4, 0))
+
+    def test_a_switch_writes_the_cache_and_switching_back_reads_it(self):
+        # q2 on Sonnet: cold, reads only the shared 500 and writes 1250.
+        #   q2 10*2 + 500*0.1 + 1250*2.5 + 10*10 = 20 + 50 + 3125 + 100     = 3295
+        # q3 back on Opus within 5 minutes of q1: reads q1's 1700, writes 100.
+        #   q3 5*4 + 1700*0.2 + 100*5 + 5*20     = 20 + 340 + 500 + 100     = 960
+        # q4 cold as before: 6870.
+        pick = lambda r: rr.TIER_MODELS["sonnet"] if r["id"] == "q2" else None  # noqa: E731
+        s = rr.simulate(self.chain(), PRICES, pick, lambda r: True)
+        self.assertAlmostEqual(s["usd"], (7500 + 3295 + 960 + 6870) * U, places=12)
+        self.assertEqual(s["switches"], 2)
+        # Only counted requests add cost and switches; the rest still move the cache.
+        s = rr.simulate(self.chain(), PRICES, pick, lambda r: r["id"] == "q3")
+        self.assertAlmostEqual(s["usd"], 960 * U, places=12)
+        self.assertEqual((s["requests"], s["switches"]), (1, 1))
+
+    def test_one_hour_cache_stays_warm_past_five_minutes(self):
+        reqs = self.chain()
+        for r in reqs:  # the same chain on 1-hour cache
+            t = r["tokens"]
+            t["cw1h"], t["cw5m"] = t["cw5m"], 0
+        s = rr.simulate(reqs, PRICES, rr.POLICIES["observed"], lambda r: r["id"] == "q4")
+        # q4 is 400s after q3, inside the hour: reads q3's 1810 and writes 20 (1-hour).
+        #   5*4 + 1810*0.2 + 20*8 + 5*20 = 20 + 362 + 160 + 100 = 642
+        self.assertAlmostEqual(s["usd"], 642 * U, places=12)
+
+    def test_cli_simulate_adds_the_baselines(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rr.main(["--projects-dir", PROJECTS, "--log", LOG, "--simulate", "sonnet-first", "--json"])
+        self.assertEqual(set(json.loads(out.getvalue())["simulations"]), {"observed", "opus-only", "sonnet-first"})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rr.main(["--projects-dir", PROJECTS, "--log", LOG, "--simulate", "all"])
+        text = out.getvalue()
+        self.assertIn("Simulated policies", text)
+        for name in rr.POLICIES:
+            self.assertIn(name, text)
+        self.assertIn("calibration: observed simulates to", text)
+
 
 class Units(unittest.TestCase):
     def test_canonical_model(self):
