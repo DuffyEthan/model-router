@@ -232,16 +232,44 @@ python3 scripts/router_report.py --since 2026-10-01 --until 2026-10-31
 #   --projects-dir DIR   transcripts root (default ~/.claude/projects)
 #   --log PATH           routing log: the plugin's store file or a /router export (repeatable)
 #   --all-sessions       also count sessions with no routing-log records
+#   --simulate POLICY    re-price the same requests under another policy (repeatable, or `all`)
 #   --json               machine-readable figures
 ```
 
 It prints:
 
 - the share of prompts by route (from the log), and of API requests and tokens by model (from the transcripts);
+- **spend by source and route**: cost and share for the main thread and for subagents, each split by the route of the prompt the request belongs to (see below);
 - the actual cost at API list prices, labelled **API-equivalent**;
 - an **Opus-only counterfactual**, with the same tokens priced at Opus;
 - **net savings**, with the switch cache penalty and the classifier overhead on separate lines;
 - the **override rate**: `/model` changes and `/router off` per user prompt.
+
+Requests from before a session's first routing-log record, such as the start of the session you installed the plugin in, are shown on the scope line as **before routing log** with their cost. They are left out of every other figure, because the router wasn't running for them.
+
+**Spend by source and route.** A main-thread request belongs to the latest prompt in its session logged at or before it. A subagent belongs to the prompt its first request falls under, so all of its requests count towards the prompt that started it. The route buckets are:
+
+- `haiku`, `sonnet` or `opus`: routed by the classifier;
+- `background → sonnet`/`haiku`: routed by `/router background`;
+- `unrouted: <skip reason>` (`off`, `slash`, `empty`), `unrouted: <origin kind>` for prompts that aren't yours (`peer`, `task-notification`, …), or `unrouted: classifier failed`/`timeout`;
+- `before first prompt`: the session's first log record was an override, not a prompt.
+
+The shares show where routing can save money. Main-thread turns routed to Haiku are often a small slice. Subagents, which the classifier never sees, are often the largest.
+
+**Simulating a policy.** `--simulate POLICY` re-prices the same requests as if each had run on the model the policy picks. It always adds `observed` and `opus-only` too, for calibration and as the baseline:
+
+| Policy | Model per request |
+|---|---|
+| `observed` | the model it actually ran on |
+| `opus-only` | Opus |
+| `sonnet-only` | Sonnet |
+| `sonnet-first` | the routed tier for routed prompts; Sonnet for unrouted prompts and subagents |
+| `sonnet-first-floor` | as `sonnet-first`, with the floor at Sonnet (Haiku routes become Sonnet) |
+| `background-sonnet` | Sonnet for subagents and prompts that aren't yours; the rest as observed |
+
+For each policy the report prints the cost, the savings against `opus-only` and the number of model switches. The savings subtract the classifier overhead for the policies that run the classifier. Switching models changes which tokens are cache reads, so the cache is modelled again. Each chain (a main thread or a subagent) tracks, per model, when it last ran and the context it left (input + cache reads + cache writes + output). A request reads its cached tokens up to that context while the model's cache is warm: within 5 minutes, or within an hour in a chain that writes 1-hour cache. Everything else is written. The first request of a chain keeps its recorded split. What it read came from outside the chain, mostly the shared system prompt and tools, and that prefix counts as warm on any model.
+
+Two calibration lines check the model against the measured figures: `observed` against the actual cost and `opus-only` against the counterfactual. On the author's sessions from 14–20 Oct 2026, both came within 3%. If yours are far apart, read the simulated savings with care. Like the counterfactual, a simulation keeps every request's tokens and output length, so it can't show a model taking more or fewer turns.
 
 By default the report reads the log straight from the plugin's store file (`~/.claude/plugins/store/model-router_*.json`). If that file isn't there, for example because `CLAUDE_CONFIG_DIR` moved it or you're on another machine, run `/router export [path]`. It writes the log as JSON Lines, to `~/.claude/model-router/routing-log.jsonl` by default, and the report picks it up or you can pass it with `--log`. With no routing log, the report still gives token and cost shares for every session, but those shares include models you picked by hand.
 
