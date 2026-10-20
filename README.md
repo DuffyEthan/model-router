@@ -140,11 +140,12 @@ In a small test, Haiku answered simple standalone questions as well as Sonnet di
 
 ### `/router background`
 
-`/router background session|sonnet|haiku` sets the tier for background notifications (`task-notification`, `peer`, etc.) and subagents. In long-running sessions started with `--model opus`, background tasks and subagents otherwise run on Opus at full price, consuming most of the session's tokens. Setting the background tier to `sonnet` (effort `medium`) or `haiku` (effort `low`) routes them to a cheaper model while keeping interactive prompts routed normally. Subagents are only ever downgraded: one already on the background tier or a cheaper one (such as a Haiku `Explore` agent) keeps its own model and effort. The default is `session` (run on the session model). The setting is remembered across sessions.
+`/router background session|sonnet|haiku` sets the tier for background notifications (`task-notification`, `peer`, etc.) and subagents. In long-running sessions started with `--model opus`, background tasks and subagents otherwise run on Opus at full price, consuming most of the session's tokens. Setting the background tier to `sonnet` (effort `medium`) or `haiku` (effort `low`) routes them to a cheaper model while keeping interactive prompts routed normally. Add an effort to override the default, for example `/router background sonnet high` for subagents doing long implementation work; `/router background sonnet` on its own goes back to the tier's default effort. Subagents are only ever downgraded: one already on the background tier or a cheaper one (such as a Haiku `Explore` agent) keeps its own model and effort. The default is `session` (run on the session model). The setting is remembered across sessions.
 
 ```
 /router background sonnet   # route background notifications and subagents to Sonnet
 /router background haiku    # route background notifications and subagents to Haiku
+/router background sonnet high   # the same on Sonnet, at high effort
 ```
 
 ### `/router sticky`

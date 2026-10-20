@@ -293,7 +293,7 @@ describe('/router stats and export', () => {
     world(on, HAIKU)
     await start($)
     expect((await router($, 'banana')).text).toBe(
-      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]',
+      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
     )
   })
 })
@@ -457,6 +457,18 @@ describe('routing log: background', () => {
     expect(store.data.background).toBe('haiku')
     await router($, 'background session')
     expect(store.data.background).toBe('session')
+  })
+
+  test('/router background <tier> <effort> saves the effort; a tier alone clears it', async ($, on) => {
+    const { store } = world(on, HAIKU)
+    await start($)
+    await router($, 'background sonnet high')
+    expect(store.data.background).toBe('sonnet')
+    expect(store.data.backgroundEffort).toBe('high')
+    await router($, 'background sonnet max')
+    expect(store.data.backgroundEffort).toBe('high')
+    await router($, 'background sonnet')
+    expect(store.data.backgroundEffort).toBeNull()
   })
 
   test('stats shows the current background setting', async ($, on) => {
