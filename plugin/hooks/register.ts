@@ -14,7 +14,7 @@ import {
   type PromptRecord,
   type SkipReason,
 } from './tracker'
-import { switchCost, tierPrices, type TierPrices } from './switch'
+import { switchCost, tierPrices, type CacheTtl, type TierPrices } from './switch'
 
 type Tier = 'haiku' | 'sonnet' | 'opus'
 type BackgroundTier = 'session' | 'sonnet' | 'haiku'
@@ -40,8 +40,10 @@ const USAGE =
 const EFFORTS: readonly ModelEffort[] = ['low', 'medium', 'high', 'xhigh']
 const DEFAULT_FLOOR: Tier = 'haiku' // no floor: every tier can be routed to
 const DEFAULT_BACKGROUND: BackgroundTier = 'session'
-// The prompt cache's default lifetime. A main thread idle longer has no warm cache to keep.
-const CACHE_TTL_MS = 5 * 60_000
+// The prompt cache's lifetimes. A main thread idle longer has no warm cache to keep.
+const CACHE_TTL_MS: Record<CacheTtl, number> = { '5m': 5 * 60_000, '1h': 60 * 60_000 }
+// The share of the last prompt a later request must read from cache to show it was warm.
+const WARM_READ = 0.8
 // The effort a background route runs at unless `/router background <tier> <effort>` set one.
 const BACKGROUND_EFFORTS: Record<'sonnet' | 'haiku', ModelEffort> = {
   sonnet: 'medium',
@@ -120,13 +122,30 @@ function lastRequest(usage: TurnUsage, sent: string, at: number | undefined): La
   return tier && prompt > 0 ? { tier, prompt, at } : undefined
 }
 
+// Whether a main-thread request shows the session writes 1-hour cache: it reported 1-hour
+// writes (raw API usage the plugin API doesn't declare, read in case the engine passes it
+// on), or, sent more than five minutes after `prev` on the same model, it read most of
+// `prev`'s prompt from cache, which a 5-minute cache would have dropped.
+function writesLongCache(
+  usage: TurnUsage,
+  cur: LastRequest | undefined,
+  prev: LastRequest | undefined,
+  sentAt: number | undefined,
+): boolean {
+  const raw = (usage as { cache_creation?: { ephemeral_1h_input_tokens?: unknown } }).cache_creation
+  const written = raw?.ephemeral_1h_input_tokens
+  if (typeof written === 'number' && written > 0) return true
+  if (!cur || !prev || cur.tier !== prev.tier || sentAt === undefined || prev.at === undefined) return false
+  return sentAt - prev.at > CACHE_TTL_MS['5m'] && (usage.cache_read_input_tokens ?? 0) >= WARM_READ * prev.prompt
+}
+
 // A route to a tier cheaper than the one the main thread last ran on, kept on that warm
-// model while its cache lives and the switch would cost more than the turn saves.
-// A route to the same or a more expensive tier is never changed.
-function keepWarm(r: Route, last: LastRequest, now: number | undefined, prices: TierPrices | null): Route {
+// model while its cache (of lifetime `ttl`) lives and the switch would cost more than the
+// turn saves. A route to the same or a more expensive tier is never changed.
+function keepWarm(r: Route, last: LastRequest, now: number | undefined, prices: TierPrices | null, ttl: CacheTtl): Route {
   if (!prices || TIERS.indexOf(r.model) >= TIERS.indexOf(last.tier)) return r
-  if (now !== undefined && last.at !== undefined && now - last.at > CACHE_TTL_MS) return r
-  const { cost, saving } = switchCost(last.prompt, last.tier, r.model, prices)
+  if (now !== undefined && last.at !== undefined && now - last.at > CACHE_TTL_MS[ttl]) return r
+  const { cost, saving } = switchCost(last.prompt, last.tier, r.model, prices, ttl)
   return cost > saving ? { ...r, model: last.tier, kept: { from: r.model, cost, saving } } : r
 }
 
@@ -158,6 +177,8 @@ export const register: Register = on => {
   // The main thread's last request as the API reported it: the tier that answered, its
   // prompt size (input + cache reads + cache writes) and when it ended.
   let lastMain: LastRequest | undefined
+  // The session's cache lifetime: 5 minutes until a request shows 1-hour writes.
+  let cacheTtl: CacheTtl = '5m'
   let prices: TierPrices | null | undefined // null: prices.json could not be read
   const counts: Record<Tier, number> = { haiku: 0, sonnet: 0, opus: 0 }
   const bgEffort = (tier: 'sonnet' | 'haiku') => backgroundEffort ?? BACKGROUND_EFFORTS[tier]
@@ -215,7 +236,7 @@ export const register: Register = on => {
       if (route && sticky && lastMain) {
         try {
           if (prices === undefined) prices = (await readTierPrices($)) ?? null
-          route = keepWarm(route, lastMain, await nowMs($), prices)
+          route = keepWarm(route, lastMain, await nowMs($), prices, cacheTtl)
         } catch {
           // a failed estimate leaves the classifier's route as it was
         }
@@ -307,9 +328,14 @@ export const register: Register = on => {
       const model = modelId(e.model, route.model)
       if (model) req = { ...e, model, effort: route.effort } // unrecognised id format: leave the request alone
     }
+    const sentAt = await nowMs($)
     const result = yield* next(req)
     try {
-      if (result?.usage) lastMain = lastRequest(result.usage, req.model, await nowMs($))
+      if (result?.usage) {
+        const cur = lastRequest(result.usage, req.model, await nowMs($))
+        if (writesLongCache(result.usage, cur, lastMain, sentAt)) cacheTtl = '1h'
+        lastMain = cur
+      }
     } catch {
       // never let bookkeeping fail the step
     }

@@ -30,6 +30,19 @@ describe('switch cost', () => {
     near(saving, 0.145 - 0.003625)
   })
 
+  test('a 1-hour cache prices every write at the 1-hour rate', () => {
+    const { cost, saving } = switchCost(100_000, 'opus', 'haiku', PRICES, '1h')
+    // 100K x ($0.20 Haiku write + $8 Opus re-write) per million
+    near(cost, 0.82)
+    near(saving, 0.16 - 0.004)
+  })
+
+  test('a row without a 1-hour write rate gives no prices', () => {
+    const bad = JSON.parse(PRICES_JSON)
+    delete bad.models['claude-sonnet-5-5'].cache_write_1h
+    expect(tierPrices(JSON.stringify(bad), IDS)).toBeUndefined()
+  })
+
   test('Haiku bills a prompt over 100K at its long-context rates', () => {
     const { cost, saving } = switchCost(150_000, 'opus', 'haiku', PRICES)
     near(cost, 0.15 * (0.625 + 5))
@@ -40,8 +53,10 @@ describe('switch cost', () => {
   for (const [warm, target] of [['opus', 'haiku'], ['opus', 'sonnet'], ['sonnet', 'haiku']] as const) {
     test(`${warm} to ${target}: costs more than it saves from 35K, saves on a small context`, () => {
       for (const context of [35_000, 100_000, 150_000, 500_000]) {
-        const { cost, saving } = switchCost(context, warm, target, PRICES)
-        expect(cost).toBeGreaterThan(saving)
+        for (const ttl of ['5m', '1h'] as const) {
+          const { cost, saving } = switchCost(context, warm, target, PRICES, ttl)
+          expect(cost).toBeGreaterThan(saving)
+        }
       }
       const small = switchCost(2_000, warm, target, PRICES)
       expect(small.cost).toBeLessThan(small.saving)

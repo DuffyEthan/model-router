@@ -8,9 +8,11 @@
 // saved, so a downgrade only pays when the context is small.
 import type { Tier } from './tracker'
 
-export type Rates = { input: number; cache_write_5m: number; cache_read: number; output: number }
+export type Rates = { input: number; cache_write_5m: number; cache_write_1h: number; cache_read: number; output: number }
 type PriceRow = Rates & { long_context?: Rates & { over_prompt_tokens: number } }
 export type TierPrices = Record<Tier, PriceRow>
+// How long the session's cache writes live: Claude Code writes 5-minute or 1-hour cache.
+export type CacheTtl = '5m' | '1h'
 
 // The turn the comparison assumes the cheaper model would answer: a few requests, some
 // new input (the prompt, tool results) and some output. Generous for a prompt the
@@ -25,7 +27,7 @@ export function tierPrices(raw: unknown, ids: Record<Tier, string>): TierPrices 
     const out = {} as TierPrices
     for (const tier of Object.keys(ids) as Tier[]) {
       const p = d.models?.[ids[tier]]
-      if (!p || ![p.input, p.cache_write_5m, p.cache_read, p.output].every(x => typeof x === 'number')) return undefined
+      if (!p || ![p.input, p.cache_write_5m, p.cache_write_1h, p.cache_read, p.output].every(x => typeof x === 'number')) return undefined
       out[tier] = p
     }
     return out
@@ -41,7 +43,7 @@ function ratesFor(row: PriceRow, promptTokens: number): Rates {
 }
 
 // For a turn moved from the `warm` model (whose cache holds `context` tokens) to the
-// cheaper `target`, in USD:
+// cheaper `target`, in USD, every cache write priced at the session's `ttl`:
 //   cost:   the one-off switch, writing the context to the target's cache and writing it
 //           to the warm model's again when the session comes back;
 //   saving: what the assumed turn costs on the warm model, plus the cache read the return
@@ -52,12 +54,14 @@ export function switchCost(
   warm: Tier,
   target: Tier,
   prices: TierPrices,
+  ttl: CacheTtl = '5m',
 ): { cost: number; saving: number } {
   const { steps, newInput, output } = ASSUMED_TURN
+  const write = ttl === '1h' ? 'cache_write_1h' : 'cache_write_5m'
   const w = ratesFor(prices[warm], context)
   const t = ratesFor(prices[target], context)
-  const cost = context * (t.cache_write_5m + w.cache_write_5m)
-  const onWarm = steps * context * w.cache_read + newInput * w.cache_write_5m + output * w.output + context * w.cache_read
-  const onTarget = (steps - 1) * context * t.cache_read + newInput * t.cache_write_5m + output * t.output
+  const cost = context * (t[write] + w[write])
+  const onWarm = steps * context * w.cache_read + newInput * w[write] + output * w.output + context * w.cache_read
+  const onTarget = (steps - 1) * context * t.cache_read + newInput * t[write] + output * t.output
   return { cost: cost / 1e6, saving: (onWarm - onTarget) / 1e6 }
 }
