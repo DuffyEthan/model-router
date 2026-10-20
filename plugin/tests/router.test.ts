@@ -1,5 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { PRICES_JSON } from './prices'
 
 const STEP = { turnId: 't1', index: 0, model: 'claude-opus-5-5', effort: 'high', messageCount: 3 } as const
 
@@ -408,7 +409,7 @@ describe('/router floor', () => {
       world(on, HAIKU, { floor: 'sonnet' })
       await start($)
       expect((await router($, args)).text).toBe(
-        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]',
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]',
       )
       expect((await router($, 'floor')).text).toContain('Floor: sonnet')
     })
@@ -544,7 +545,7 @@ describe('/router background', () => {
       world(on, HAIKU, { background: 'sonnet' })
       await start($)
       expect((await router($, args)).text).toBe(
-        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|export [path]]',
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku]|sticky [on|off]|export [path]]',
       )
       expect((await router($, 'background')).text).toContain('Background: sonnet')
     })
@@ -731,5 +732,271 @@ describe('subagent routing', () => {
     await submit($, 'hi')
     await step($, { model: 'custom.claude-opus-5-5', agentId: 'sub-1' })
     expect(sent).toEqual([{ model: 'custom.claude-opus-5-5', effort: STEP.effort }])
+  })
+})
+
+// ---- Sticky routing: a cheaper pick stays on the warm model when switching costs more.
+
+const OPUS = '{"model":"opus","effort":"high","reason":"hard"}'
+const SONNET = '{"model":"sonnet","effort":"medium","reason":"coding"}'
+
+// The classifier answers `replies` in order, then repeats the last.
+function sequence(...replies: string[]) {
+  let i = 0
+  return () => ({ isAnswered: true, text: replies[Math.min(i++, replies.length - 1)], usage: {} })
+}
+
+// What the plugin's fs.read of prices.json returns.
+function prices(on: On, text = PRICES_JSON) {
+  on('fs.read', () => ({ value: text }) as never)
+}
+
+// Like captureStep, but every response reports `prompt` tokens of usage (mostly cache
+// reads) from the model the request named; `prompt` null reports no usage.
+function captureUsage(on: On, prompt: () => number | null) {
+  const sent: { model: string; effort?: unknown }[] = []
+  on('turn.step', async function* (_$, e) {
+    sent.push({ model: e.model, effort: e.effort })
+    const n = prompt()
+    const usage =
+      n === null
+        ? null
+        : { model: e.model, input_tokens: 10, cache_read_input_tokens: n - 10, cache_creation_input_tokens: 0, output_tokens: 500 }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
+  })
+  return sent
+}
+
+describe('sticky routing', () => {
+  test('a Haiku pick stays on warm Opus at 100K and says why', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU))
+    prices(on)
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'design the migration')
+    await step($)
+    await submit($, 'what does ls -la do')
+    await step($)
+    expect(sent).toEqual([
+      { model: 'claude-opus-5-5', effort: 'high' },
+      { model: 'claude-opus-5-5', effort: 'low' },
+    ])
+    const text = (await router($)).text
+    expect(text).toContain('Sticky: on')
+    expect(text).toContain('Last route: opus · low — trivial (kept on opus: switch to haiku would cost more, ~$0.51 vs ~$0.14 saved)')
+    expect(text).toContain('This session: haiku 0, sonnet 0, opus 2')
+  })
+
+  test('the session model\'s own turn (a slash command) counts as warm', async ($, on) => {
+    world(on, HAIKU)
+    prices(on)
+    const sent = captureUsage(on, () => 60_000)
+    await start($)
+    await submit($, '/review')
+    await step($) // session model, claude-opus-5-5
+    await submit($, 'what does ls -la do')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-opus-5-5', effort: 'low' })
+  })
+
+  test('Sonnet pick stays on warm Opus; Haiku pick stays on warm Sonnet', async ($, on) => {
+    world(on, sequence(OPUS, SONNET, SONNET, HAIKU))
+    prices(on)
+    const sent = captureUsage(on, () => 50_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await submit($, 'write it')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-opus-5-5', effort: 'medium' })
+    await router($, 'sticky off')
+    await submit($, 'write it') // switches to Sonnet with sticky off
+    await step($)
+    await router($, 'sticky on')
+    await submit($, 'rename it')
+    await step($)
+    expect(sent.slice(2)).toEqual([
+      { model: 'claude-sonnet-5-5', effort: 'medium' },
+      { model: 'claude-sonnet-5-5', effort: 'low' },
+    ])
+  })
+
+  test('an escalation is never held back', async ($, on) => {
+    world(on, sequence(HAIKU, OPUS))
+    prices(on)
+    const sent = captureUsage(on, () => 150_000)
+    await start($)
+    await submit($, 'hi')
+    await step($, { model: 'claude-haiku-5-5' })
+    await submit($, 'design the migration')
+    await step($, { model: 'claude-haiku-5-5' })
+    expect(sent[1]).toEqual({ model: 'claude-opus-5-5', effort: 'high' })
+    expect((await router($)).text).not.toContain('kept on')
+  })
+
+  test('a small context still switches down', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU))
+    prices(on)
+    const sent = captureUsage(on, () => 2_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
+  })
+
+  test('the warm model is the last request\'s, so a long turn on Opus is warm at its end', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU))
+    prices(on)
+    let n = 0
+    const sent = captureUsage(on, () => (n += 1) * 40_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await step($, { index: 1 })
+    await submit($, 'hi')
+    await step($)
+    expect(sent[2]).toEqual({ model: 'claude-opus-5-5', effort: 'low' })
+  })
+
+  test('a cache idle past five minutes is cold: the pick switches', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU, OPUS, HAIKU))
+    prices(on)
+    const clock = mock.clock(on, { now: 1_000_000 })
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await clock.advance(4 * 60_000)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-opus-5-5', effort: 'low' })
+    await submit($, 'design more')
+    await step($)
+    await clock.advance(5 * 60_000 + 1)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[3]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
+  })
+
+  test('/router sticky off switches on every pick; the setting is stored', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU))
+    prices(on)
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    expect((await router($, 'sticky off')).text).toBe('Sticky: off (every pick switches models, whatever the cache)')
+    await submit($, 'design it')
+    await step($)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
+    expect((await router($)).text).toContain('Sticky: off')
+  })
+
+  test('a sticky setting of off saved by an earlier session is honoured', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU), { sticky: false })
+    prices(on)
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
+  })
+
+  test('/router sticky reports the setting; a bad value is refused', async ($, on) => {
+    world(on, HAIKU)
+    await start($)
+    expect((await router($, 'sticky')).text).toBe(
+      'Sticky: on (a cheaper pick stays on the warm model when switching would cost more than it saves)',
+    )
+    expect((await router($, 'sticky maybe')).text).toContain('Usage: /router')
+    expect((await router($, 'STICKY OFF')).text).toContain('Sticky: off')
+  })
+
+  test('an unusable prices.json: the pick switches', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU))
+    prices(on, 'not json')
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
+  })
+
+  test('a response with no usage leaves nothing warm', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU))
+    prices(on)
+    const sent = captureUsage(on, () => null)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
+  })
+
+  test('a main-thread compaction leaves nothing warm; a subagent\'s does not', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU, OPUS, HAIKU))
+    prices(on)
+    const summary = [{ role: 'user' as const, text: 'summary', toolUses: [] }]
+    on('session.compact', () => ({ messages: summary }) as never)
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await $.session.compact({ trigger: 'auto', messages: summary, agentId: 'sub-1' })
+    await submit($, 'hi')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-opus-5-5', effort: 'low' })
+    await submit($, 'design more')
+    await step($)
+    await $.session.compact({ trigger: 'manual', messages: summary })
+    await submit($, 'hi')
+    await step($)
+    expect(sent[3]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
+  })
+
+  test('subagent requests do not set the warm model', async ($, on) => {
+    world(on, sequence(SONNET, HAIKU))
+    prices(on)
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'write it')
+    await step($)
+    await step($, { agentId: 'sub-1', model: 'claude-opus-5-5' })
+    await submit($, 'hi')
+    await step($)
+    expect(sent[2]).toEqual({ model: 'claude-sonnet-5-5', effort: 'low' })
+  })
+
+  test('the floor applies first: a Haiku pick floored to Sonnet still stays on warm Opus', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU), { floor: 'sonnet' })
+    prices(on)
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await submit($, 'hi')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-opus-5-5', effort: 'low' })
+    const text = (await router($)).text
+    expect(text).toContain('(raised from haiku by the floor) (kept on opus: switch to sonnet would cost more')
+  })
+
+  test('background-routed and router-off turns are not held back', async ($, on) => {
+    world(on, OPUS, { background: 'haiku' })
+    prices(on)
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await submit($, 'task update', { kind: 'task-notification' })
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
   })
 })

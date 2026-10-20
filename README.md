@@ -147,6 +147,23 @@ In a small test, Haiku answered simple standalone questions as well as Sonnet di
 /router background haiku    # route background notifications and subagents to Haiku
 ```
 
+### `/router sticky`
+
+The prompt cache is per model. Every main-thread request already carries about 35K tokens (system prompt and tools) even at the start of a session, and real sessions run to 100K and more. Moving a turn to a cheaper model first writes that whole context to the new model's cache, and coming back writes it to the old model's cache again. On real transcripts those writes cost about twice what the cheaper turns saved.
+
+With `/router sticky on` (the default), when the classifier picks a tier cheaper than the one the main thread last ran on, the router compares the two:
+
+- **Switch cost:** the context × the target's 5-minute cache-write price, plus the context × the warm model's cache-write price for the return.
+- **Saving:** what an assumed turn (3 requests, 5K new input tokens, 2K output tokens) costs on the warm model, minus what it costs on the cheaper one.
+
+If the switch costs more, the turn stays on the warm model at the classifier's effort. The context size and model come from the usage the API reported for the main thread's last request, not from an estimate. Prices come from [`prices.json`](plugin/hooks/prices.json), including Haiku's long-context rates above 100K tokens. Escalations are never held back. Nothing is held back when the warm model last answered more than five minutes ago (its cache has expired), after a compaction, or when the last request reported no usage.
+
+At current prices, staying wins above about 5K tokens of context for Opus → Sonnet, 14K for Opus → Haiku and 14K for Sonnet → Haiku. Every real request is larger than that, so in practice a session with a warm cache only moves up. `/router status` shows a held-back pick as `kept on opus: switch to haiku would cost more` with both estimates, and `/router stats` counts them. Background routes and subagents are not affected. `/router sticky off` switches on every pick, as before. The setting is remembered across sessions.
+
+```
+/router sticky off   # always follow the classifier, whatever the cache
+```
+
 ## The `route` CLI
 
 ```bash
