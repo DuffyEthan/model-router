@@ -244,11 +244,6 @@ def request_chains(requests: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]
     return list(chains.values())
 
 
-def held_context(t: Dict[str, float]) -> float:
-    """The prefix a request leaves in the cache: input + cache reads + cache writes + output."""
-    return t["input"] + t["cache_read"] + t["cw5m"] + t["cw1h"] + t["output"]
-
-
 def mark_switches(requests: List[Dict[str, Any]]) -> None:
     """Sets r["switch_reads"]: cache-write tokens of r that an unbroken Opus session would
     have read from the cache instead.
@@ -271,7 +266,7 @@ def mark_switches(requests: List[Dict[str, Any]]) -> None:
                 ttl = TTL_1H if t["cw1h"] else TTL_5M
                 gap = (r["ts"] - prev["ts"]).total_seconds()
                 if gap <= ttl:
-                    r["switch_reads"] = min(cw, held_context(prev["tokens"]))
+                    r["switch_reads"] = min(cw, total(prev["tokens"]))
             prev = r
 
 
@@ -489,7 +484,7 @@ def simulate(
                 cw = t["cw5m"] + t["cw1h"]
                 share_1h = t["cw1h"] / cw if cw else (1.0 if ttl == TTL_1H else 0.0)
                 sim.update(cache_read=reads, cw1h=writes * share_1h, cw5m=writes * (1 - share_1h))
-            held[model] = (r["ts"], held_context(t))
+            held[model] = (r["ts"], total(t))
             if counted(r):
                 prompt_tokens = t["input"] + t["cache_read"] + t["cw5m"] + t["cw1h"]
                 rates = rate_card(prices, model, prompt_tokens)
@@ -510,6 +505,8 @@ def empty_bundle() -> Dict[str, float]:
 
 
 def total(t: Dict[str, float]) -> float:
+    """Every token in a bundle: input + cache writes + cache reads + output. For a request this is
+    also the prefix it leaves in the cache."""
     return t["input"] + t["cw5m"] + t["cw1h"] + t["cache_read"] + t["output"]
 
 

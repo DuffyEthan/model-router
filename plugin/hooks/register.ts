@@ -6,6 +6,7 @@ import {
   classifyOrigin,
   formatStats,
   LOG_KEY,
+  LOG_VERSION,
   toJsonl,
   toUsage,
   type ClassifierUsage,
@@ -13,10 +14,10 @@ import {
   type Outcome,
   type PromptRecord,
   type SkipReason,
+  type Tier,
 } from './tracker'
 import { switchCost, tierPrices, type CacheTtl, type TierPrices } from './switch'
 
-type Tier = 'haiku' | 'sonnet' | 'opus'
 type BackgroundTier = 'session' | 'sonnet' | 'haiku'
 // `raisedFrom` / `cappedFrom`: the tier the classifier picked when the floor raised it or
 // the ceiling lowered it.
@@ -53,14 +54,9 @@ const BACKGROUND_EFFORTS: Record<'sonnet' | 'haiku', ModelEffort> = {
   haiku: 'low',
 }
 
-// The persisted floor, or the default when it is unset, unknown or corrupt.
-function asFloor(v: unknown): Tier {
-  return TIERS.includes(v as Tier) ? (v as Tier) : DEFAULT_FLOOR
-}
-
-// The persisted ceiling, or the default when it is unset, unknown or corrupt.
-function asCeiling(v: unknown): Tier {
-  return TIERS.includes(v as Tier) ? (v as Tier) : DEFAULT_CEILING
+// A persisted tier, or `fallback` when it is unset, unknown or corrupt.
+function asTier(v: unknown, fallback: Tier): Tier {
+  return TIERS.includes(v as Tier) ? (v as Tier) : fallback
 }
 
 function asBackground(v: unknown): BackgroundTier {
@@ -204,8 +200,8 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     enabled = (await $.store.get('enabled')) !== false
-    floor = asFloor(await $.store.get('floor'))
-    ceiling = asCeiling(await $.store.get('ceiling'))
+    floor = asTier(await $.store.get('floor'), DEFAULT_FLOOR)
+    ceiling = asTier(await $.store.get('ceiling'), DEFAULT_CEILING)
     background = asBackground(await $.store.get('background'))
     backgroundEffort = asEffort(await $.store.get('backgroundEffort'))
     sticky = (await $.store.get('sticky')) !== false
@@ -273,7 +269,7 @@ export const register: Register = on => {
     // Build the record from metadata only (never the prompt text), then let the
     // prompt in first so logging adds no latency to it.
     const record: PromptRecord = {
-      v: 1,
+      v: LOG_VERSION,
       kind: 'prompt',
       ts,
       session: null,
@@ -308,7 +304,7 @@ export const register: Register = on => {
     try {
       if (e.source === 'command' || e.source === 'picker' || e.source === 'sdk') {
         await log($, {
-          v: 1,
+          v: LOG_VERSION,
           kind: 'override',
           ts: await nowIso($),
           session: await sessionId($),
@@ -448,7 +444,7 @@ export const register: Register = on => {
       }
       try {
         await log($, {
-          v: 1,
+          v: LOG_VERSION,
           kind: 'override',
           ts: await nowIso($),
           session: await sessionId($),
