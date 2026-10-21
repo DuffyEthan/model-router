@@ -2,7 +2,7 @@
 """End-to-end: load the real plugin into a headless Claude Code session started
 on --model opus, send a prompt, and check which model actually answered.
 
-Costs real answer tokens (roughly $0.05-0.15 for the whole default set).
+Costs real answer tokens (roughly $1 for the whole default set, mostly the real Sonnet/Opus answers).
 
     python3 evals/e2e.py
     python3 evals/e2e.py --only h1,o1

@@ -67,11 +67,11 @@ Each file contains:
 
 ## Cost
 
-Prices from claude.com/pricing (fetched 2026-10-14). Haiku 5.5: $0.10 per million input tokens, $0.50 per million output tokens (prompts under 100K tokens).
+Prices from platform.claude.com/docs/en/about-claude/pricing (fetched 2026-10-14). Haiku 5.5: $0.10 per million input tokens, $0.50 per million output tokens (prompts under 100K tokens).
 
 **`routing_eval.py`, full default run:** 65 cases × 3 runs = 195 classifications.
 
-- Per call: the top-level README estimates **about $0.0002** (~1,000 input and ~150 output tokens typical, $0.00045 at most). That is **about $0.04 for the run**, $0.09 at most. Eval cases have little or no conversation tail, so most calls should come in under that: the router prompt (1,438 characters, ~360 tokens) plus an average ~120-character input is ~400 input tokens, which with ~40 to 100 output tokens is about $0.00007, or ~$0.015 for the run.
+- Per call: the top-level README estimates **about $0.0002** (~1,000 input and ~150 output tokens typical, $0.00045 at most). The committed 2026-10-14 run measured **$0.044 for all 195 calls, about $0.00023 each**: the CLI reports roughly 1,500 input tokens per call even for short prompts, because it adds its own overhead on top of the router prompt (1,438 characters, ~360 tokens).
 - Plan on **under $0.10**. The script prints the actual cost reported by the CLI and stores it in the results file.
 
 **`e2e.py`, default six cases:** about $0.90 API-equivalent on the 2026-10-14 run, and it varies with answer length. One Opus case (`o1`) was $0.77 of that. Most of the cost is the real Sonnet/Opus answers (Sonnet 5.5 $2/$10, Opus 5.5 $4/$20 per million input/output tokens), not the classifier.

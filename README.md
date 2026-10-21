@@ -42,7 +42,7 @@ Answer `y` to add the marketplace, then pick a scope. *User* scope enables the p
 
 **Claude desktop app:** the Code tab can't run `/plugin`, but it loads plugins installed at User scope. Install with either command above from a terminal, then start a new Code session and type `/router` to check it's on.
 
-Requirements: Claude Code 2.1.275 or later for the plugin, and Python 3.8+ for the CLI. The plugin uses your normal Claude Code login, so it works on a Pro/Max subscription (where it aims to stretch usage limits) or with an API key (where it aims to save money).
+Requirements: Claude Code 2.1.275 or later for the plugin, and Python 3.9+ for the CLI. The plugin uses your normal Claude Code login, so it works on a Pro/Max subscription (where it aims to stretch usage limits) or with an API key (where it aims to save money).
 
 ## The plugin
 
@@ -171,7 +171,7 @@ If the switch costs more, the turn stays on the warm model at the classifier's e
 
 Claude Code writes 5-minute or 1-hour cache. The router treats a session as writing 1-hour cache once a main-thread request reports 1-hour cache writes, or once a request sent more than five minutes after the previous one, on the same model, reads at least 80% of that request's prompt from cache. Until then it assumes 5 minutes.
 
-At current prices, staying wins above about 5K tokens of context for Opus → Sonnet, 14K for Opus → Haiku and 14K for Sonnet → Haiku. Every real request is larger than that, so in practice a session with a warm cache only moves up. `/router status` shows a held-back pick as `kept on opus: switch to haiku would cost more` with both estimates, and `/router stats` counts them. Background routes and subagents are not affected. `/router sticky off` switches on every pick, as before. The setting is remembered across sessions.
+At current prices, staying wins above about 5K tokens of context for Opus → Sonnet, 15K for Opus → Haiku and 14K for Sonnet → Haiku. Every real request is larger than that, so in practice a session with a warm cache only moves up. `/router status` shows a held-back pick as `kept on opus: switch to haiku would cost more` with both estimates, and `/router stats` counts them. Background routes and subagents are not affected. `/router sticky off` switches on every pick, as before. The setting is remembered across sessions.
 
 ```
 /router sticky off   # always follow the classifier, whatever the cache
@@ -306,7 +306,7 @@ By default the report reads the log straight from the plugin's store file (`~/.c
 
 Prices live in one file, `plugin/hooks/prices.json`, with the source URL and the date they were checked. Models missing from it, and fast-mode requests, are listed as **unpriced** and left out of the cost lines. They are never counted as $0.
 
-**What is stored.** One record per prompt: the time, the session ID, the route (tier and effort, or `session` when nothing was routed), the classifier's latency, outcome (ok / failed / timeout / skipped) and token usage, the prompt's origin (user, slash command or other, plus the raw origin kind such as `scheduled-trigger`), and whether it arrived mid-turn. Overrides are logged too: `/router off`, `/router on` and manual `/model` changes. **No prompt text is ever stored**, and the report never reads or prints message content. The log keeps the newest 4,000 records, about 1 MB.
+**What is stored.** One record per prompt: the time, the session ID, the route (tier and effort, or `session` when nothing was routed), the classifier's latency, outcome (ok / failed / timeout / skipped) and token usage, the prompt's origin (user, slash command or other, plus the raw origin kind such as `scheduled-trigger`), and whether it arrived mid-turn. Overrides are logged too: `/router off`, `/router on` and manual `/model` changes. **No prompt text is ever stored**, and the report never reads or prints message content. The log keeps the newest 4,000 records, trimmed further if it would pass 1.5 MB.
 
 **Limits of the counterfactual.**
 
@@ -357,9 +357,9 @@ make test-installer # lints install.sh and runs it offline: pinned checksum, tam
 make test-evals    # offline tests for the eval scripts (classifier calls faked)
 ```
 
-- `plugin/tests/router.test.ts` and `tracker.test.ts`: 70 tests that run the real plugin against a mocked engine. They cover routing to each tier, full model IDs for the first-party API, Bedrock and Vertex (and leaving unrecognised IDs alone), a stale route never carrying over to slash commands or non-user turns, fail-safe behaviour (garbage replies, bad JSON, unknown models, a classifier that fails or throws), subagents being left alone, slash commands not being classified, `/router on|off|status|stats|export` including the saved off setting, and the routing log (which never stores prompt text).
-- `cli/tests/`: 42 tests for the CLI's classification, fallbacks, input validation, flag handling, stdin and logging, plus a check that its router prompt matches the plugin's.
-- `scripts/tests/`: 20 tests for the cost report, with costs worked out by hand, including a session with model switches and a Haiku request over 100K tokens.
+- `plugin/tests/` (`router.test.ts`, `tracker.test.ts`, `switch.test.ts`): 246 tests that run the real plugin against a mocked engine. They cover routing to each tier, full model IDs for the first-party API, Bedrock and Vertex (and leaving unrecognised IDs alone), a stale route never carrying over to slash commands or non-user turns, fail-safe behaviour (garbage replies, bad JSON, unknown models, a classifier that fails or throws), subagents being left alone, slash commands not being classified, `/router on|off|status|stats|export` including the saved off setting, and the routing log (which never stores prompt text).
+- `cli/tests/`: 63 tests for the CLI's classification, fallbacks, input validation, flag handling, stdin and logging, plus a check that its router prompt matches the plugin's.
+- `scripts/tests/`: 30 tests for the cost report, with costs worked out by hand, including a session with model switches and a Haiku request over 100K tokens.
 
 CI runs all of these on every push. The plugin job installs a pinned Claude Code version; the plugin tests need no login or API key.
 
