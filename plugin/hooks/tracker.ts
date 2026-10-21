@@ -34,6 +34,7 @@ export type PromptRecord = {
   originKind: string // PromptOrigin.kind as the engine stamped it ('none' when absent)
   midTurn: boolean // prompt.submit carried a turnId: typed over / delivered into a running turn
   floored?: true // the classifier picked a tier below /router floor; `tier` is the floor
+  capped?: true // the classifier picked a tier above /router ceiling; `tier` is the ceiling
   sticky?: true // the classifier picked a cheaper tier, but switching would cost more; `tier` is the warm model
   backgroundTier?: Tier // the prompt ran on the background tier setting
   usage?: ClassifierUsage // the classifier call's own tokens, when it reported them
