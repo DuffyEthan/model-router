@@ -9,6 +9,7 @@ Usage:
     route -p "your prompt"         # classify, then run headless (print mode)
     route --dry-run "your prompt"  # only show the routing decision
     route --floor sonnet "prompt"  # never route below sonnet
+    route --ceiling sonnet "prompt"  # never route above sonnet
     route "your prompt" -- --permission-mode plan   # flags after -- go to claude
     echo "prompt" | route -p       # prompt from stdin
 """
@@ -26,6 +27,7 @@ CLASSIFIER_EFFORT = "low"
 MODELS = ("haiku", "sonnet", "opus")
 EFFORTS = ("low", "medium", "high", "xhigh")
 DEFAULT_FLOOR = "haiku"  # no floor: every tier can be routed to
+DEFAULT_CEILING = "opus"  # no ceiling: every tier can be routed to
 # Like the plugin: if routing fails, don't pick a model; claude uses the session default.
 SESSION_DEFAULT = {"model": None, "effort": None, "reason": "classifier failed; using the session model"}
 LOG_PATH = Path(os.environ.get("MODEL_ROUTER_LOG", Path.home() / ".model-router" / "log.jsonl"))
@@ -115,6 +117,18 @@ def apply_floor(decision: dict, floor: str) -> dict:
     return {**decision, "model": floor, "effort": effort if effort in EFFORTS else "medium", "floored": True}
 
 
+def apply_ceiling(decision: dict, ceiling: str) -> dict:
+    """Lower a routed model above `ceiling` to `ceiling`, like the plugin's /router ceiling.
+
+    A failed classification (model None) is left alone, and the effort is kept as for the floor.
+    """
+    model = decision.get("model")
+    if model not in MODELS or MODELS.index(model) <= MODELS.index(ceiling):
+        return decision
+    effort = decision.get("effort")
+    return {**decision, "model": ceiling, "effort": effort if effort in EFFORTS else "medium", "capped": True}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Route a prompt to the cheapest capable Claude model.")
     ap.add_argument("prompt", nargs="*", help="prompt text (or pipe via stdin)")
@@ -124,6 +138,8 @@ def main() -> None:
     ap.add_argument("--effort", help=f"override the routed effort level ({', '.join(EFFORTS)})")
     ap.add_argument("--floor", default=DEFAULT_FLOOR,
                     help=f"never route below this model ({', '.join(MODELS)}; default {DEFAULT_FLOOR})")
+    ap.add_argument("--ceiling", default=DEFAULT_CEILING,
+                    help=f"never route above this model ({', '.join(MODELS)}; default {DEFAULT_CEILING})")
     argv = sys.argv[1:]
     # Everything after "--" goes to claude untouched (needed for flags that take
     # a value, e.g. `-- --permission-mode plan`, which we can't tell from a prompt).
@@ -133,7 +149,7 @@ def main() -> None:
         argv, passthrough = argv[:i], argv[i + 1:]
     args, extra = ap.parse_known_args(argv)  # other unknown flags (e.g. --flag=value) too
     passthrough = extra + passthrough
-    validate(args.model, args.effort, args.floor)  # reject bad overrides before reading stdin or classifying
+    validate(args.model, args.effort, args.floor, args.ceiling)  # reject bad overrides before reading stdin or classifying
 
     prompt = " ".join(args.prompt).strip()
     if not prompt and not sys.stdin.isatty():
@@ -144,7 +160,7 @@ def main() -> None:
     if args.model is not None:
         decision = {"model": args.model, "effort": args.effort or "medium", "reason": "forced"}
     else:
-        decision = apply_floor(classify(prompt), args.floor)
+        decision = apply_ceiling(apply_floor(classify(prompt), args.floor), args.ceiling)
         if args.effort:
             decision["effort"] = args.effort
     log(prompt, decision)
@@ -160,11 +176,15 @@ def main() -> None:
     os.execvp("claude", build_command(decision, passthrough, args.print, prompt))  # hand the terminal over
 
 
-def validate(model, effort, floor=None) -> None:
-    """Exit non-zero unless model/effort/floor are allowed values. None means "flag omitted"."""
-    for kind, value, allowed in (("model", model, MODELS), ("effort", effort, EFFORTS), ("floor", floor, MODELS)):
+def validate(model, effort, floor=None, ceiling=None) -> None:
+    """Exit non-zero unless model/effort/floor/ceiling are allowed values and the floor is
+    not above the ceiling. None means "flag omitted"."""
+    for kind, value, allowed in (("model", model, MODELS), ("effort", effort, EFFORTS),
+                                 ("floor", floor, MODELS), ("ceiling", ceiling, MODELS)):
         if value is not None and value not in allowed:
             sys.exit(f"route: invalid {kind} {value!r}; allowed: {', '.join(allowed)}")
+    if floor is not None and ceiling is not None and MODELS.index(floor) > MODELS.index(ceiling):
+        sys.exit(f"route: --floor {floor} is above --ceiling {ceiling}")
 
 
 def build_command(decision: dict, passthrough: list[str], headless: bool, prompt: str) -> list[str]:

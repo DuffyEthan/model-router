@@ -185,12 +185,13 @@ route -p "prompt"              # route, then run headless and print the answer
 route --dry-run "prompt"       # only show the decision
 route --model opus "prompt"    # skip routing
 route --floor sonnet "prompt"  # route, but never below sonnet
+route --ceiling sonnet "prompt" # route, but never above sonnet
 echo "prompt" | route -p       # prompt from stdin
 ```
 
 How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
 
-To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. If the classifier fails (error, timeout or an unusable reply), `route` prints a note to stderr and starts `claude` with no `--model` or `--effort` from the router, so you get the session default, like the plugin. `--model` and `--effort` are checked before anything runs; an invalid value exits with an error listing the allowed ones. `--floor haiku|sonnet|opus` (default `haiku`) works like the plugin's `/router floor`: a routed model below the floor is raised to it, keeping the effort. It is checked the same way, and it doesn't change a failed classification or a model forced with `--model`. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
+To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. If the classifier fails (error, timeout or an unusable reply), `route` prints a note to stderr and starts `claude` with no `--model` or `--effort` from the router, so you get the session default, like the plugin. `--model` and `--effort` are checked before anything runs; an invalid value exits with an error listing the allowed ones. `--floor haiku|sonnet|opus` (default `haiku`) works like the plugin's `/router floor`: a routed model below the floor is raised to it, keeping the effort. It is checked the same way, and it doesn't change a failed classification or a model forced with `--model`. `--ceiling haiku|sonnet|opus` (default `opus`) is the plugin's `/router ceiling`: a routed model above the ceiling is lowered to it, keeping the effort, with the same exceptions. A `--floor` above the `--ceiling` exits with an error. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
 
 ## Tuning
 
