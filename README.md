@@ -322,6 +322,8 @@ Prices live in one file, `plugin/hooks/prices.json`, with the source URL and the
 - Cache writes made right after a model switch are counted as cache reads in the counterfactual. This covers up to the size of the previous request's context, and only if the switch came within the cache's lifetime (5 minutes, or 1 hour for 1-hour writes). The rest of each write is treated as new content, which costs a write either way.
 - Costs are at API list prices. On Pro or Max you don't pay per token, so treat the figures as API-equivalent: a measure of how much usage routing saves, not dollars billed.
 
+Sample, approximate reports from the author's own usage are in [`docs/savings/`](docs/savings/).
+
 ## Alternatives
 
 Claude Code already has ways to mix models, and other people have built routers too:
