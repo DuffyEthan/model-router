@@ -73,7 +73,9 @@ function applyFloor(r: Route, floor: Tier): Route {
   return { ...r, model: floor, effort, raisedFrom: r.model }
 }
 
-// turn.step takes full model ids, not aliases. Update these when new models ship.
+// turn.step takes full model ids, not aliases. Update these when new models ship, and add
+// matching rows (and classifier_model/counterfactual_model) to prices.json;
+// scripts/tests/test_model_ids.py fails if they drift apart.
 const MODEL_IDS: Record<Tier, string> = {
   haiku: 'claude-haiku-5-5',
   sonnet: 'claude-sonnet-5-5',
