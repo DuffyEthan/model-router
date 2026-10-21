@@ -50,7 +50,7 @@ Once it's installed, routing just happens.
 
 ### How it works, step by step
 
-When you send a prompt, Haiku makes a quick decision first, then that turn's requests are rewritten to use the model and effort it picked. The plugin is one file, [`plugin/hooks/register.ts`](plugin/hooks/register.ts), which hooks into four points in Claude Code:
+When you send a prompt, Haiku makes a quick decision first, then that turn's requests are rewritten to use the model and effort it picked. The plugin's entry point is [`plugin/hooks/register.ts`](plugin/hooks/register.ts), with the switch-cost check in `switch.ts` and the routing log in `tracker.ts`. It hooks into several points in Claude Code; the four that matter most are:
 
 ```
 You type a prompt
@@ -83,11 +83,11 @@ Next prompt → back to ①, fresh decision
 - The plugin swaps in the chosen model's full name (e.g. `claude-sonnet-5-5`) and the chosen effort level.
 - Everything else is locked by Claude Code: the conversation, the instructions, the tools. That's why context is never affected.
 - One turn can make many requests, because the model calls a tool, reads the result and continues. All of them use the routed model.
-- Requests from subagents are left alone.
+- Requests from subagents are left alone, unless you set [`/router background`](#router-background) to downgrade them.
 
 **③ Startup (`session.start`).** This loads your on/off setting, which is saved across sessions, and registers the `/router` command.
 
-**④ `/router` (`command.run`).** `on` and `off` turn routing on and off. `status` shows the last decision with Haiku's reason and how many prompts went to each model this session.
+**④ `/router` (`command.run`).** `on` and `off` turn routing on and off. `status` shows the last decision with Haiku's reason and how many prompts went to each model this session. `stats`, `export`, `floor`, `ceiling`, `background` and `sticky` are covered in [Commands](#commands) and below.
 
 **Where the savings are meant to come from:** the model doing the work in that turn is what you pay for. Each Haiku check costs about $0.0002 (see [Cost of a classification](#cost-of-a-classification)). If it sends a quick question to Haiku instead of Opus, that answer usually costs a small fraction of what it would have, and effort set to `low` cuts thinking tokens further. See [Benefits and drawbacks](#benefits-and-drawbacks) for when a switch gets expensive, including long sessions where Haiku can cost more than staying on Opus.
 
@@ -119,6 +119,12 @@ So a classification costs **about $0.0002**, or roughly $0.02 per 100 prompts. T
 | `/router` or `/router status` | Show on/off, the last decision and why, and the routing counts for this session |
 | `/router off` | Stop routing and use the session's model (remembered across sessions) |
 | `/router on` | Turn routing back on |
+| `/router stats` | Summarise the routing log, and show the current floor, ceiling, background and sticky settings (see [Measure it yourself](#measure-it-yourself)) |
+| `/router export [path]` | Write the routing log as JSON Lines (default `~/.claude/model-router/routing-log.jsonl`) |
+| `/router floor [haiku\|sonnet\|opus]` | Set the lowest model the router may pick, or show it (see [`/router floor`](#router-floor)) |
+| `/router ceiling [haiku\|sonnet\|opus]` | Set the highest model the router may pick, or show it (see [`/router ceiling`](#router-ceiling)) |
+| `/router background [session\|sonnet\|haiku] [effort]` | Set the tier for background notifications and subagents (see [`/router background`](#router-background)) |
+| `/router sticky [on\|off]` | Hold a downgrade back when the cache switch would cost more (see [`/router sticky`](#router-sticky)) |
 
 A tested example, with sessions started with `--model opus`:
 
@@ -185,9 +191,11 @@ route -p "prompt"              # route, then run headless and print the answer
 route --dry-run "prompt"       # only show the decision
 route --model opus "prompt"    # skip routing
 route --floor sonnet "prompt"  # route, but never below sonnet
-route --ceiling sonnet "prompt" # route, but never above sonnet
+route --ceiling sonnet "prompt" # route, but never above sonnet (needs a `route` newer than v0.2.0)
 echo "prompt" | route -p       # prompt from stdin
 ```
+
+The installer currently pins `route` at v0.2.0, which predates `--ceiling`. To use `--ceiling` before the next release, run `cli/route.py` from a checkout of this repo. The plugin's `/router ceiling` is not affected.
 
 How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
 
@@ -235,7 +243,7 @@ These are design goals. There's no real-world usage data yet showing how much it
 - **Haiku can misjudge a prompt.** A hard problem phrased simply can get routed too low, and the answer may be weaker. Check `/router status` to see the reasoning, re-ask with more detail, or run `/router off` for that stretch of work. It also adds latency to every prompt: typically 1–3 seconds, with a 20-second timeout.
 - **It overrides your `/model` and `/effort` choices** while it's on. `/router off` hands control back.
 - **Savings depend on your mix.** If most of your prompts really are hard, they go to Opus anyway and you pay the small routing overhead for nothing.
-- **Subagents aren't routed.** They keep their own configured models and effort.
+- **Subagents aren't classified.** They keep their own configured models and effort, unless `/router background sonnet|haiku` downgrades the ones above that tier.
 - **The plugin API is early access.** The `turn.step` / `prompt.submit` hooks may change between Claude Code releases, and model IDs in `register.ts` need updating when new models ship.
 - **The CLI routes only once.** `route` picks a model for the whole session based on its first prompt. Use the plugin for per-prompt routing.
 
@@ -262,6 +270,7 @@ Routing only pays if the cheaper turns save more than the classifier and the cac
 python3 scripts/router_report.py --since 2026-10-01 --until 2026-10-31
 #   --projects-dir DIR   transcripts root (default ~/.claude/projects)
 #   --log PATH           routing log: the plugin's store file or a /router export (repeatable)
+#   --prices PATH        price table (default plugin/hooks/prices.json)
 #   --all-sessions       also count sessions with no routing-log records
 #   --simulate POLICY    re-price the same requests under another policy (repeatable, or `all`)
 #   --json               machine-readable figures
@@ -333,16 +342,18 @@ How this project differs: it switches the **main session's** model and effort **
 plugin/                           # the Claude Code plugin
   .claude-plugin/plugin.json
   hooks/hooks.json
-  hooks/register.ts
-cli/route.py                      # the standalone `route` wrapper
+  hooks/register.ts               #   entry point: hooks and the /router command
+  hooks/switch.ts                 #   switch-cost check for /router sticky
   hooks/tracker.ts                #   routing log used by /router stats and the report
   hooks/prices.json               #   price table (source URL and date inside)
-cli/tests/                        # CLI unit tests
-plugin/tests/                     # plugin tests (claude plugin test)
+  tests/                          #   plugin tests (claude plugin test)
+cli/route.py                      # the standalone `route` wrapper
+cli/tests/                        # CLI unit tests, including the prompt-parity check
 scripts/router_report.py          # cost & routing report (see Measure it yourself)
 scripts/tests/                    # report tests on synthetic transcripts
 evals/                            # routing-quality and end-to-end evals (real model calls)
 evals/results/                    # committed results of each eval run
+docs/                             # banner, demo.gif and its demo.tape, social preview
 install.sh                        # one-line installer
 ```
 
