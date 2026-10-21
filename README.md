@@ -138,6 +138,16 @@ A tested example, with sessions started with `--model opus`:
 
 In a small test, Haiku answered simple standalone questions as well as Sonnet did, so the default is fine for most people. The floor lets you opt out of Haiku answers anyway.
 
+### `/router ceiling`
+
+`/router ceiling haiku|sonnet|opus` sets the highest model the router may pick, the opposite of the floor. When the classifier picks a more expensive tier, the ceiling tier answers instead, at the classifier's effort. `/router ceiling sonnet` caps spend by never routing to Opus; switch the session model with `/model` when a task really needs it. `/router ceiling` on its own shows the current ceiling, and `/router status` and `/router stats` show it too. The default is `opus`, which means no ceiling. The setting is remembered across sessions. Like the floor, it never changes turns the router leaves alone, and it doesn't cap the `/router background` tier. With `/router sticky` on, a cheaper pick is never held on a warm model above the ceiling.
+
+The floor can't be set above the ceiling, or the ceiling below the floor; the command says which to change first. Setting both to the same tier sends every routed prompt to that tier.
+
+```
+/router ceiling sonnet   # hard prompts go to Sonnet instead of Opus; simple ones still go to Haiku
+```
+
 ### `/router background`
 
 `/router background session|sonnet|haiku` sets the tier for background notifications (`task-notification`, `peer`, etc.) and subagents. In long-running sessions started with `--model opus`, background tasks and subagents otherwise run on Opus at full price, consuming most of the session's tokens. Setting the background tier to `sonnet` (effort `medium`) or `haiku` (effort `low`) routes them to a cheaper model while keeping interactive prompts routed normally. Add an effort to override the default, for example `/router background sonnet high` for subagents doing long implementation work; `/router background sonnet` on its own goes back to the tier's default effort. Subagents are only ever downgraded: one already on the background tier or a cheaper one (such as a Haiku `Explore` agent) keeps its own model and effort. The default is `session` (run on the session model). The setting is remembered across sessions.
@@ -175,12 +185,13 @@ route -p "prompt"              # route, then run headless and print the answer
 route --dry-run "prompt"       # only show the decision
 route --model opus "prompt"    # skip routing
 route --floor sonnet "prompt"  # route, but never below sonnet
+route --ceiling sonnet "prompt" # route, but never above sonnet
 echo "prompt" | route -p       # prompt from stdin
 ```
 
 How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
 
-To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. If the classifier fails (error, timeout or an unusable reply), `route` prints a note to stderr and starts `claude` with no `--model` or `--effort` from the router, so you get the session default, like the plugin. `--model` and `--effort` are checked before anything runs; an invalid value exits with an error listing the allowed ones. `--floor haiku|sonnet|opus` (default `haiku`) works like the plugin's `/router floor`: a routed model below the floor is raised to it, keeping the effort. It is checked the same way, and it doesn't change a failed classification or a model forced with `--model`. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
+To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. If the classifier fails (error, timeout or an unusable reply), `route` prints a note to stderr and starts `claude` with no `--model` or `--effort` from the router, so you get the session default, like the plugin. `--model` and `--effort` are checked before anything runs; an invalid value exits with an error listing the allowed ones. `--floor haiku|sonnet|opus` (default `haiku`) works like the plugin's `/router floor`: a routed model below the floor is raised to it, keeping the effort. It is checked the same way, and it doesn't change a failed classification or a model forced with `--model`. `--ceiling haiku|sonnet|opus` (default `opus`) is the plugin's `/router ceiling`: a routed model above the ceiling is lowered to it, keeping the effort, with the same exceptions. A `--floor` above the `--ceiling` exits with an error. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
 
 ## Tuning
 
