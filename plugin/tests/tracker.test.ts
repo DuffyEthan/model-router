@@ -293,7 +293,7 @@ describe('/router stats and export', () => {
     world(on, HAIKU)
     await start($)
     expect((await router($, 'banana')).text).toBe(
-      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
+      'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|ceiling [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
     )
   })
 })
@@ -337,6 +337,44 @@ describe('routing log: floor', () => {
     const text = (await router($, 'stats')).text
     expect(text).toContain('No records yet.')
     expect(text).toContain('Floor: haiku')
+  })
+})
+
+describe('routing log: ceiling', () => {
+  const OPUS = '{"model":"opus","effort":"high","reason":"x"}'
+
+  test('a prompt the ceiling capped logs the tier used and capped: true', async ($, on) => {
+    const { store } = world(on, OPUS, { ceiling: 'sonnet' })
+    await start($)
+    await submit($, 'design the migration')
+    expect(prompts(store)[0]).toMatchObject({ tier: 'sonnet', effort: 'high', outcome: 'ok', capped: true })
+  })
+
+  test('a prompt at or below the ceiling carries no capped field', async ($, on) => {
+    const { store } = world(on, HAIKU, { ceiling: 'sonnet' })
+    await start($)
+    await submit($, 'what does ls -la do')
+    await submit($, '/clear')
+    for (const r of prompts(store)) expect('capped' in r).toBe(false)
+  })
+
+  test('/router ceiling saves the setting in the store; a bad or refused one writes nothing', async ($, on) => {
+    const { store } = world(on, HAIKU, { floor: 'sonnet' })
+    await start($)
+    await router($, 'ceiling sonnet')
+    expect(store.data.ceiling).toBe('sonnet')
+    await router($, 'ceiling banana')
+    expect(store.data.ceiling).toBe('sonnet')
+    await router($, 'ceiling haiku') // below the floor
+    expect(store.data.ceiling).toBe('sonnet')
+    await router($, 'ceiling opus')
+    expect(store.data.ceiling).toBe('opus')
+  })
+
+  test('stats shows the current ceiling', async ($, on) => {
+    world(on, HAIKU, { ceiling: 'sonnet' })
+    await start($)
+    expect((await router($, 'stats')).text).toContain('\nFloor: haiku\nCeiling: sonnet')
   })
 })
 

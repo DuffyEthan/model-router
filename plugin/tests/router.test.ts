@@ -409,7 +409,7 @@ describe('/router floor', () => {
       world(on, HAIKU, { floor: 'sonnet' })
       await start($)
       expect((await router($, args)).text).toBe(
-        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|ceiling [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
       )
       expect((await router($, 'floor')).text).toContain('Floor: sonnet')
     })
@@ -441,6 +441,184 @@ describe('/router floor', () => {
       expect((await router($, 'floor')).text).toContain('Floor: haiku')
     })
   }
+})
+
+describe('/router ceiling', () => {
+  const SONNET = '{"model":"sonnet","effort":"medium","reason":"coding"}'
+  const OPUS = '{"model":"opus","effort":"xhigh","reason":"hard"}'
+
+  test('default ceiling is opus: an Opus pick is not capped', async ($, on) => {
+    const statuses = world(on, OPUS)
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'design the migration')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-opus-5-5', effort: 'xhigh' }])
+    expect(statuses).toEqual(['router → opus · xhigh'])
+    expect((await router($, 'ceiling')).text).toContain('Ceiling: opus')
+  })
+
+  // [ceiling, classifier reply, model sent, effort sent]
+  for (const [ceiling, reply, model, effort] of [
+    ['opus', HAIKU, 'claude-haiku-5-5', 'low'],
+    ['opus', SONNET, 'claude-sonnet-5-5', 'medium'],
+    ['sonnet', HAIKU, 'claude-haiku-5-5', 'low'],
+    ['sonnet', SONNET, 'claude-sonnet-5-5', 'medium'],
+    ['sonnet', OPUS, 'claude-sonnet-5-5', 'xhigh'],
+    ['haiku', HAIKU, 'claude-haiku-5-5', 'low'],
+    ['haiku', SONNET, 'claude-haiku-5-5', 'medium'],
+    ['haiku', OPUS, 'claude-haiku-5-5', 'xhigh'],
+  ] as const) {
+    test(`ceiling ${ceiling}: ${JSON.parse(reply).model} is sent as ${model} @ ${effort}`, async ($, on) => {
+      world(on, reply)
+      const sent = captureStep(on)
+      await start($)
+      await router($, `ceiling ${ceiling}`)
+      await submit($, 'a prompt')
+      await step($)
+      expect(sent).toEqual([{ model, effort }])
+    })
+  }
+
+  test('a capped route with a bad effort runs at medium', async ($, on) => {
+    world(on, '{"model":"opus","effort":"turbo","reason":"x"}')
+    const sent = captureStep(on)
+    await start($)
+    await router($, 'ceiling sonnet')
+    await submit($, 'a prompt')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'medium' }])
+  })
+
+  test('the status line and /router status show the capped route', async ($, on) => {
+    const statuses = world(on, OPUS)
+    await start($)
+    await router($, 'ceiling sonnet')
+    await submit($, 'design the migration')
+    expect(statuses).toEqual(['router → sonnet · xhigh'])
+    const text = (await router($, 'status')).text
+    expect(text).toContain('Ceiling: sonnet')
+    expect(text).toContain('Last route: sonnet · xhigh — hard (capped from opus by the ceiling)')
+    expect(text).toContain('haiku 0, sonnet 1, opus 0') // counts the tier actually used
+  })
+
+  test('/router ceiling with no argument reports the ceiling', async ($, on) => {
+    world(on, HAIKU, { ceiling: 'haiku' })
+    await start($)
+    expect((await router($, 'ceiling')).text).toBe('Ceiling: haiku (the router never picks a model above haiku)')
+  })
+
+  test('/router ceiling <tier> sets it, is case-insensitive and reports it', async ($, on) => {
+    world(on, HAIKU)
+    await start($)
+    expect((await router($, 'ceiling Sonnet')).text).toBe(
+      'Ceiling: sonnet (the router never picks a model above sonnet)',
+    )
+    expect((await router($)).text).toContain('Ceiling: sonnet')
+  })
+
+  for (const args of ['ceiling banana', 'ceiling gpt-4', 'ceiling sonnet opus', 'ceiling 2', 'ceilings']) {
+    test(`rejects /router ${args} and keeps the ceiling`, async ($, on) => {
+      world(on, HAIKU, { ceiling: 'sonnet' })
+      await start($)
+      expect((await router($, args)).text).toBe(
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|ceiling [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
+      )
+      expect((await router($, 'ceiling')).text).toContain('Ceiling: sonnet')
+    })
+  }
+
+  test('refuses a ceiling below the floor and keeps both', async ($, on) => {
+    world(on, HAIKU, { floor: 'sonnet' })
+    await start($)
+    expect((await router($, 'ceiling haiku')).text).toBe(
+      'Ceiling not changed: haiku is below the floor (sonnet). Lower the floor first.',
+    )
+    const text = (await router($)).text
+    expect(text).toContain('Floor: sonnet')
+    expect(text).toContain('Ceiling: opus')
+  })
+
+  test('refuses a floor above the ceiling and keeps both', async ($, on) => {
+    world(on, HAIKU, { ceiling: 'sonnet' })
+    await start($)
+    expect((await router($, 'floor opus')).text).toBe(
+      'Floor not changed: opus is above the ceiling (sonnet). Raise the ceiling first.',
+    )
+    const text = (await router($)).text
+    expect(text).toContain('Floor: haiku')
+    expect(text).toContain('Ceiling: sonnet')
+  })
+
+  test('a floor equal to the ceiling pins every route to that tier', async ($, on) => {
+    world(on, sequence(HAIKU, OPUS))
+    const sent = captureStep(on)
+    await start($)
+    await router($, 'ceiling sonnet')
+    await router($, 'floor sonnet')
+    for (const _ of [1, 2]) {
+      await submit($, 'a prompt')
+      await step($)
+    }
+    expect(sent).toEqual([
+      { model: 'claude-sonnet-5-5', effort: 'low' },
+      { model: 'claude-sonnet-5-5', effort: 'xhigh' },
+    ])
+  })
+
+  test('a stored floor above the stored ceiling: the ceiling wins', async ($, on) => {
+    world(on, HAIKU, { floor: 'opus', ceiling: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'hi')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'low' }])
+  })
+
+  test('a ceiling saved by an earlier session is honoured', async ($, on) => {
+    world(on, OPUS, { ceiling: 'haiku' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-haiku-5-5', effort: 'xhigh' }])
+  })
+
+  for (const corrupt of ['banana', 'Haiku', '', 3, null, true, ['haiku'], { tier: 'haiku' }]) {
+    test(`a stored ceiling of ${JSON.stringify(corrupt)} is treated as opus`, async ($, on) => {
+      world(on, OPUS, { ceiling: corrupt })
+      const sent = captureStep(on)
+      await start($)
+      await submit($, 'design it')
+      await step($)
+      expect(sent).toEqual([{ model: 'claude-opus-5-5', effort: 'xhigh' }])
+      expect((await router($, 'ceiling')).text).toContain('Ceiling: opus')
+    })
+  }
+
+  // Like the floor, the ceiling only changes what the classifier picks.
+  test('slash commands and non-user turns keep the session model', async ($, on) => {
+    world(on, HAIKU, { ceiling: 'haiku' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, '/security-review')
+    await step($)
+    await submit($, 'Background task finished', { kind: 'task-notification' })
+    await step($)
+    expect(sent).toEqual([
+      { model: STEP.model, effort: STEP.effort },
+      { model: STEP.model, effort: STEP.effort },
+    ])
+  })
+
+  test('the background setting is not capped', async ($, on) => {
+    world(on, HAIKU, { ceiling: 'haiku', background: 'sonnet' })
+    const sent = captureStep(on)
+    await start($)
+    await submit($, 'Background task finished', { kind: 'task-notification' })
+    await step($)
+    expect(sent).toEqual([{ model: 'claude-sonnet-5-5', effort: 'medium' }])
+  })
 })
 
 describe('/router floor leaves unrouted turns alone', () => {
@@ -556,7 +734,7 @@ describe('/router background', () => {
       world(on, HAIKU, { background: 'sonnet' })
       await start($)
       expect((await router($, args)).text).toBe(
-        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
+        'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|ceiling [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
       )
       expect((await router($, 'background')).text).toContain('Background: sonnet')
     })
@@ -1106,6 +1284,35 @@ describe('sticky routing', () => {
     expect(sent[1]).toEqual({ model: 'claude-opus-5-5', effort: 'low' })
     const text = (await router($)).text
     expect(text).toContain('(raised from haiku by the floor) (kept on opus: switch to sonnet would cost more')
+  })
+
+  test('a warm model above the ceiling is never kept', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU))
+    prices(on)
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await router($, 'ceiling sonnet')
+    await submit($, 'hi')
+    await step($)
+    expect(sent[1]).toEqual({ model: 'claude-haiku-5-5', effort: 'low' })
+  })
+
+  test('a capped route can still stay on a warm model at or below the ceiling', async ($, on) => {
+    world(on, sequence(OPUS, HAIKU), { ceiling: 'sonnet' })
+    prices(on)
+    const sent = captureUsage(on, () => 100_000)
+    await start($)
+    await submit($, 'design it')
+    await step($)
+    await submit($, 'hi')
+    await step($)
+    expect(sent).toEqual([
+      { model: 'claude-sonnet-5-5', effort: 'high' },
+      { model: 'claude-sonnet-5-5', effort: 'low' },
+    ])
+    expect((await router($)).text).toContain('(kept on sonnet: switch to haiku would cost more')
   })
 
   test('background-routed and router-off turns are not held back', async ($, on) => {

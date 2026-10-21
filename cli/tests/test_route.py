@@ -249,7 +249,9 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(tuple(props["effort"]["enum"]), route.EFFORTS)
 
 
-class FloorTests(unittest.TestCase):
+class RouteMainCase(unittest.TestCase):
+    """Runs route.main() with a canned classifier decision; nothing is executed."""
+
     def run_main(self, argv, decision):
         with mock.patch.object(sys, "argv", ["route", *argv]), \
              mock.patch.object(route, "classify", return_value=dict(decision)) as classify, \
@@ -266,6 +268,8 @@ class FloorTests(unittest.TestCase):
         cmd = execvp.call_args.args[1]
         return (cmd[cmd.index("--model") + 1], cmd[cmd.index("--effort") + 1]), log.call_args.args[1]
 
+
+class FloorTests(RouteMainCase):
     def test_default_floor_is_haiku_and_changes_nothing(self):
         for model in route.MODELS:
             (m, e), logged = self.routed(["do a thing"], model)
@@ -335,6 +339,86 @@ class FloorTests(unittest.TestCase):
             route.main()
         text = " ".join(out.getvalue().split())  # argparse wraps to the terminal width
         self.assertIn("--floor FLOOR never route below this model (haiku, sonnet, opus; default haiku)", text)
+
+
+class CeilingTests(RouteMainCase):
+    def test_default_ceiling_is_opus_and_changes_nothing(self):
+        for model in route.MODELS:
+            (m, e), logged = self.routed(["do a thing"], model)
+            self.assertEqual((m, e), (model, "low"))
+            self.assertNotIn("capped", logged)
+
+    def test_each_ceiling_lowers_higher_tiers_and_leaves_lower_ones(self):
+        for ceiling in route.MODELS:
+            for model in route.MODELS:
+                with self.subTest(ceiling=ceiling, model=model):
+                    (m, e), logged = self.routed(["--ceiling", ceiling, "do a thing"], model, "xhigh")
+                    capped = route.MODELS.index(model) > route.MODELS.index(ceiling)
+                    self.assertEqual(m, ceiling if capped else model)
+                    self.assertEqual(e, "xhigh")  # effort kept either way
+                    self.assertEqual(logged.get("capped"), True if capped else None)
+
+    def test_apply_ceiling_falls_back_to_medium_on_bad_effort(self):
+        d = route.apply_ceiling({"model": "opus", "effort": "turbo", "reason": "r"}, "sonnet")
+        self.assertEqual((d["model"], d["effort"], d["capped"]), ("sonnet", "medium", True))
+
+    def test_floor_equal_to_ceiling_pins_the_tier(self):
+        for model in route.MODELS:
+            (m, _), _ = self.routed(["--floor", "sonnet", "--ceiling", "sonnet", "do a thing"], model)
+            self.assertEqual(m, "sonnet")
+
+    def test_effort_flag_still_overrides_capped_route(self):
+        (m, e), _ = self.routed(["--ceiling", "haiku", "--effort", "low", "do a thing"], "opus", "xhigh")
+        self.assertEqual((m, e), ("haiku", "low"))
+
+    def test_dry_run_shows_capped_route(self):
+        _, _, execvp = self.run_main(["--dry-run", "--ceiling", "sonnet", "do a thing"],
+                                     {"model": "opus", "effort": "high", "reason": "hard"})
+        execvp.assert_not_called()
+        self.assertIn("[router] → sonnet / high: hard", self.stderr)
+
+    def test_ceiling_never_changes_a_failed_classification(self):
+        for ceiling in route.MODELS:
+            _, log, execvp = self.run_main(["--ceiling", ceiling, "do a thing"], route.SESSION_DEFAULT)
+            self.assertEqual(execvp.call_args.args[1], ["claude", "do a thing"])
+            self.assertIsNone(log.call_args.args[1]["model"])
+
+    def test_ceiling_does_not_override_forced_model(self):
+        classify, _, execvp = self.run_main(["--ceiling", "haiku", "--model", "opus", "do a thing"],
+                                            {"model": "sonnet", "effort": "low", "reason": "r"})
+        classify.assert_not_called()
+        self.assertEqual(execvp.call_args.args[1][1:3], ["--model", "opus"])
+
+    def rejected(self, argv):
+        with mock.patch.object(sys, "argv", ["route", *argv, "do a thing"]), \
+             mock.patch.object(route, "classify") as classify, \
+             mock.patch.object(route.os, "execvp") as execvp, \
+             mock.patch.object(sys, "stdin", io.StringIO()), \
+             mock.patch("sys.stderr", new_callable=io.StringIO), \
+             self.assertRaises(SystemExit) as cm:
+            route.main()
+        classify.assert_not_called()
+        execvp.assert_not_called()
+        return str(cm.exception.code)
+
+    def test_invalid_ceiling_is_rejected_before_classifying(self):
+        for bad in ("gpt-4", "", "Opus", "max"):
+            with self.subTest(bad=bad):
+                msg = self.rejected(["--ceiling", bad])
+                self.assertIn(f"invalid ceiling {bad!r}", msg)
+                self.assertIn("haiku, sonnet, opus", msg)
+
+    def test_floor_above_ceiling_is_rejected_before_classifying(self):
+        self.assertIn("--floor opus is above --ceiling sonnet",
+                      self.rejected(["--floor", "opus", "--ceiling", "sonnet"]))
+
+    def test_help_mentions_ceiling(self):
+        with mock.patch.object(sys, "argv", ["route", "--help"]), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+             self.assertRaises(SystemExit):
+            route.main()
+        text = " ".join(out.getvalue().split())
+        self.assertIn("--ceiling CEILING never route above this model (haiku, sonnet, opus; default opus)", text)
 
 
 class LogTests(unittest.TestCase):

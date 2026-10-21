@@ -18,7 +18,8 @@ import { switchCost, tierPrices, type CacheTtl, type TierPrices } from './switch
 
 type Tier = 'haiku' | 'sonnet' | 'opus'
 type BackgroundTier = 'session' | 'sonnet' | 'haiku'
-// `raisedFrom`: the tier the classifier picked when the floor raised it.
+// `raisedFrom` / `cappedFrom`: the tier the classifier picked when the floor raised it or
+// the ceiling lowered it.
 // `background`: the route came from the /router background setting, not the classifier.
 // `kept`: the route stayed on the model the main thread last ran on because switching to
 // `from` would have cost more (`cost`, USD) than the turn saved (`saving`).
@@ -27,6 +28,7 @@ type Route = {
   effort: ModelEffort
   reason: string
   raisedFrom?: Tier
+  cappedFrom?: Tier
   background?: true
   kept?: { from: Tier; cost: number; saving: number }
 }
@@ -36,9 +38,10 @@ const TIERS: readonly Tier[] = ['haiku', 'sonnet', 'opus']
 const BACKGROUND_TIERS: readonly BackgroundTier[] = ['session', 'sonnet', 'haiku']
 const CLASSIFIER_TIMEOUT_MS = 20000
 const USAGE =
-  'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]'
+  'Usage: /router [on|off|status|stats|floor [haiku|sonnet|opus]|ceiling [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]'
 const EFFORTS: readonly ModelEffort[] = ['low', 'medium', 'high', 'xhigh']
 const DEFAULT_FLOOR: Tier = 'haiku' // no floor: every tier can be routed to
+const DEFAULT_CEILING: Tier = 'opus' // no ceiling: every tier can be routed to
 const DEFAULT_BACKGROUND: BackgroundTier = 'session'
 // The prompt cache's lifetimes. A main thread idle longer has no warm cache to keep.
 const CACHE_TTL_MS: Record<CacheTtl, number> = { '5m': 5 * 60_000, '1h': 60 * 60_000 }
@@ -53,6 +56,11 @@ const BACKGROUND_EFFORTS: Record<'sonnet' | 'haiku', ModelEffort> = {
 // The persisted floor, or the default when it is unset, unknown or corrupt.
 function asFloor(v: unknown): Tier {
   return TIERS.includes(v as Tier) ? (v as Tier) : DEFAULT_FLOOR
+}
+
+// The persisted ceiling, or the default when it is unset, unknown or corrupt.
+function asCeiling(v: unknown): Tier {
+  return TIERS.includes(v as Tier) ? (v as Tier) : DEFAULT_CEILING
 }
 
 function asBackground(v: unknown): BackgroundTier {
@@ -71,6 +79,15 @@ function applyFloor(r: Route, floor: Tier): Route {
   if (TIERS.indexOf(r.model) >= TIERS.indexOf(floor)) return r
   const effort = EFFORTS.includes(r.effort) ? r.effort : 'medium'
   return { ...r, model: floor, effort, raisedFrom: r.model }
+}
+
+// Never route above `ceiling`. A capped route keeps the classifier's effort, like a raised
+// one. Applied after the floor, so the ceiling wins if a stored pair ever conflicts (the
+// commands refuse to set one).
+function applyCeiling(r: Route, ceiling: Tier): Route {
+  if (TIERS.indexOf(r.model) <= TIERS.indexOf(ceiling)) return r
+  const effort = EFFORTS.includes(r.effort) ? r.effort : 'medium'
+  return { ...r, model: ceiling, effort, cappedFrom: r.model }
 }
 
 // turn.step takes full model ids, not aliases. Update these when new models ship.
@@ -166,10 +183,11 @@ Rules:
 Reply with only a JSON object, no prose: {"model": "haiku"|"sonnet"|"opus", "effort": "low"|"medium"|"high"|"xhigh", "reason": "<one short sentence>"}`
 
 export const register: Register = on => {
-  // Module state resets on a hot reload; `enabled`, `floor`, `background`,
+  // Module state resets on a hot reload; `enabled`, `floor`, `ceiling`, `background`,
   // `backgroundEffort` and `sticky` are persisted in $.store.
   let enabled = true
   let floor: Tier = DEFAULT_FLOOR
+  let ceiling: Tier = DEFAULT_CEILING
   let background: BackgroundTier = DEFAULT_BACKGROUND
   let backgroundEffort: ModelEffort | undefined // undefined: BACKGROUND_EFFORTS[background]
   let sticky = true
@@ -187,13 +205,14 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     enabled = (await $.store.get('enabled')) !== false
     floor = asFloor(await $.store.get('floor'))
+    ceiling = asCeiling(await $.store.get('ceiling'))
     background = asBackground(await $.store.get('background'))
     backgroundEffort = asEffort(await $.store.get('backgroundEffort'))
     sticky = (await $.store.get('sticky')) !== false
     await $.command.register({
       name: 'router',
       description:
-        'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
+        'Model router: /router [on|off|status|stats|floor [haiku|sonnet|opus]|ceiling [haiku|sonnet|opus]|background [session|sonnet|haiku] [low|medium|high|xhigh]|sticky [on|off]|export [path]]',
     })
     return next(e)
   })
@@ -232,8 +251,9 @@ export const register: Register = on => {
         c = { outcome: 'failed' } // a classifier error must never block the prompt
       }
       latencyMs = await elapsedSince($, t0)
-      route = c.route && applyFloor(c.route, floor)
-      if (route && sticky && lastMain) {
+      route = c.route && applyCeiling(applyFloor(c.route, floor), ceiling)
+      // A warm model above the ceiling is never kept: the ceiling is a hard cap.
+      if (route && sticky && lastMain && TIERS.indexOf(lastMain.tier) <= TIERS.indexOf(ceiling)) {
         try {
           if (prices === undefined) prices = (await readTierPrices($)) ?? null
           route = keepWarm(route, lastMain, await nowMs($), prices, cacheTtl)
@@ -266,6 +286,7 @@ export const register: Register = on => {
       originKind: e.origin?.kind ?? 'none',
       midTurn: e.turnId !== undefined,
       ...(route?.raisedFrom ? { floored: true } : {}),
+      ...(route?.cappedFrom ? { capped: true } : {}),
       ...(route?.kept ? { sticky: true } : {}),
       ...(route?.background ? { backgroundTier: route.model } : {}),
       ...(usage ? { usage } : {}),
@@ -355,7 +376,7 @@ export const register: Register = on => {
       return {
         text:
           `${formatStats(await readLog($), await readClassifierPrice($))}\n` +
-          `Floor: ${floor}\nBackground: ${bgLabel()}\nSticky: ${sticky ? 'on' : 'off'}`,
+          `Floor: ${floor}\nCeiling: ${ceiling}\nBackground: ${bgLabel()}\nSticky: ${sticky ? 'on' : 'off'}`,
       }
     }
     if (arg === 'sticky' || arg.startsWith('sticky ')) {
@@ -375,10 +396,25 @@ export const register: Register = on => {
       const want = arg.slice('floor'.length).trim()
       if (want) {
         if (!TIERS.includes(want as Tier)) return { text: USAGE }
+        if (TIERS.indexOf(want as Tier) > TIERS.indexOf(ceiling)) {
+          return { text: `Floor not changed: ${want} is above the ceiling (${ceiling}). Raise the ceiling first.` }
+        }
         floor = want as Tier
         await $.store.set('floor', floor)
       }
       return { text: `Floor: ${floor} (the router never picks a model below ${floor})` }
+    }
+    if (arg === 'ceiling' || arg.startsWith('ceiling ')) {
+      const want = arg.slice('ceiling'.length).trim()
+      if (want) {
+        if (!TIERS.includes(want as Tier)) return { text: USAGE }
+        if (TIERS.indexOf(want as Tier) < TIERS.indexOf(floor)) {
+          return { text: `Ceiling not changed: ${want} is below the floor (${floor}). Lower the floor first.` }
+        }
+        ceiling = want as Tier
+        await $.store.set('ceiling', ceiling)
+      }
+      return { text: `Ceiling: ${ceiling} (the router never picks a model above ${ceiling})` }
     }
     if (arg === 'background' || arg.startsWith('background ')) {
       const want = arg.slice('background'.length).trim().split(/\s+/).filter(Boolean)
@@ -425,15 +461,17 @@ export const register: Register = on => {
       return { text: USAGE }
     }
     const raised = route?.raisedFrom ? ` (raised from ${route.raisedFrom} by the floor)` : ''
+    const capped = route?.cappedFrom ? ` (capped from ${route.cappedFrom} by the ceiling)` : ''
     const kept = route?.kept
       ? ` (kept on ${route.model}: switch to ${route.kept.from} would cost more, ` +
         `~$${route.kept.cost.toFixed(2)} vs ~$${route.kept.saving.toFixed(2)} saved)`
       : ''
-    const last = route ? `${route.model} · ${route.effort} — ${route.reason}${raised}${kept}` : 'none yet'
+    const last = route ? `${route.model} · ${route.effort} — ${route.reason}${raised}${capped}${kept}` : 'none yet'
     return {
       text: [
         `Model router: ${enabled ? 'on' : 'off'}`,
         `Floor: ${floor}`,
+        `Ceiling: ${ceiling}`,
         `Background: ${bgLabel()}`,
         `Sticky: ${sticky ? 'on' : 'off'}`,
         `Last route: ${last}`,
