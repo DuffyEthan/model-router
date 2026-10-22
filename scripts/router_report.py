@@ -14,6 +14,8 @@ Joins the model-router plugin's routing log with Claude Code's session transcrip
     their own;
   * spend by source (main thread or subagent) and by the route of the prompt each
     request belongs to;
+  * the same cost lines split by whether the router was on, so time spent with
+    /router off doesn't dilute the savings;
   * the override rate (/model changes and /router off per user prompt), a rough quality
     proxy only;
   * with --simulate, the same requests re-priced under other routing policies.
@@ -332,6 +334,7 @@ def read_log(paths: Iterable[str], stats: Dict[str, int]) -> List[Dict[str, Any]
 
 BEFORE_FIRST_PROMPT = "before first prompt"
 NOT_LOGGED = "session not in routing log"
+ROUTER_OFF = "unrouted: off"
 
 
 def attribute(requests: List[Dict[str, Any]], log: List[Dict[str, Any]]) -> None:
@@ -550,6 +553,10 @@ def build_report(
     by_model: Dict[str, Dict[str, Any]] = {}
     unpriced: Dict[str, Dict[str, Any]] = {}
     by_source: Dict[str, Dict[str, Dict[str, Any]]] = {"main": {}, "subagent": {}}
+    # Router on vs off: a request is "off" when its prompt was sent with /router off set.
+    by_router: Dict[str, Dict[str, Any]] = {
+        k: {"requests": 0, "sessions": set(), "actual_usd": 0.0, "counterfactual_usd": 0.0} for k in ("on", "off")
+    }
     actual = counterfactual = penalty = 0.0
 
     for r in reqs:
@@ -584,7 +591,14 @@ def build_report(
             cf["cw1h"] = t["cw1h"] - s * t["cw1h"] / cw
             cf["cache_read"] = t["cache_read"] + s
         cf_rates = rate_card(prices, cf_model, prompt_tokens)
-        counterfactual += price_tokens(cf_rates, cf, mult)
+        cf_cost = price_tokens(cf_rates, cf, mult)
+        counterfactual += cf_cost
+
+        grp = by_router["off" if route_bucket(r) == ROUTER_OFF else "on"]
+        grp["requests"] += 1
+        grp["sessions"].add(r["session"])
+        grp["actual_usd"] += cost
+        grp["counterfactual_usd"] += cf_cost
 
         row = by_model.setdefault(name, {"requests": 0, "tokens": empty_bundle(), "cost": 0.0, "switch_requests": 0})
         row["requests"] += 1
@@ -632,6 +646,12 @@ def build_report(
     for name in simulate_policies:
         simulations[name] = simulate(requests, prices, POLICIES[name], lambda r: id(r) in in_scope)
 
+    # The classifier only runs while the router is on, so its overhead counts there.
+    for k, grp in by_router.items():
+        grp["sessions"] = len(grp["sessions"])
+        overhead = clf_cost if k == "on" and with_usage else 0.0
+        grp["net_savings_usd"] = grp["counterfactual_usd"] - grp["actual_usd"] - overhead
+
     priced_requests = sum(m["requests"] for m in by_model.values())
     priced_tokens = sum(total(m["tokens"]) for m in by_model.values())
     return {
@@ -639,6 +659,7 @@ def build_report(
         "requests": len(reqs),
         "before_log": {"requests": len(before), "cost": before_cost},
         "by_source": by_source,
+        "by_router": by_router,
         "simulations": simulations,
         "priced_requests": priced_requests,
         "priced_tokens": priced_tokens,
@@ -768,6 +789,19 @@ def format_report(rep: Dict[str, Any], stats: Dict[str, int], prices: Dict[str, 
     if rep["classifier_usd"] is None and rep["classifier_calls"]:
         L.append("  (classifier overhead unknown: the log has no usage for its calls; net savings exclude it)")
     L.append("")
+
+    if rep["by_router"]["off"]["requests"]:
+        L.append("Router on vs off (off: requests under a prompt sent with /router off set):")
+        L.append(f"  {'router':<8}{'sessions':>9}{'requests':>9}{'actual':>13}{cf_label + ' only':>16}{'net savings':>14}")
+        for k in ("on", "off"):
+            g = rep["by_router"][k]
+            n = g["net_savings_usd"]
+            L.append(
+                f"  {k:<8}{g['sessions']:>9}{g['requests']:>9}{_usd(g['actual_usd']):>13}"
+                f"{_usd(g['counterfactual_usd']):>16}{_usd(n):>14}  ({_pct(n, g['counterfactual_usd']).strip()})"
+            )
+        L.append("  (classifier overhead counts against \"on\"; a session can appear in both rows)")
+        L.append("")
 
     sims = rep["simulations"]
     if sims:
