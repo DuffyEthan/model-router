@@ -26,8 +26,10 @@ test-evals:
 
 # Lints install.sh, checks the pinned checksum matches the pinned ref in git,
 # then runs the installer offline against a file:// mirror with a stub `claude`:
-# good checksum installs, bad checksum fails closed, no hash tool fails closed,
-# and a cli/route.py in the current directory is never used.
+# good checksum installs as `model-router`, an old `route` link keeps working with a
+# note, a shadowing `model-router` earlier on PATH is reported, bad checksum fails
+# closed, no hash tool fails closed, and a cli/route.py in the current directory is
+# never used.
 # Needs the pinned ref in local git history (CI checks out with fetch-depth: 0).
 test-installer:
 	sh -n install.sh
@@ -54,9 +56,22 @@ test-installer:
 	installed="$$t/home/.local/share/model-router/route.py"; \
 	run "$$t/stub:$$PATH" || { cat "$$t/out"; fail "install with good checksum failed"; }; \
 	cmp -s "$$installed" "$$t/good.py" || fail "installed route.py is not the pinned, verified file"; \
-	[ -L "$$t/home/.local/bin/route" ] || fail "route symlink not created"; \
+	[ -L "$$t/home/.local/bin/model-router" ] || fail "model-router symlink not created"; \
+	[ -e "$$t/home/.local/bin/route" ] && fail "a fresh install created the old route link"; \
 	[ -x "$$installed" ] || fail "route.py not executable"; \
 	echo "ok: curl|sh-style install fetches and verifies route.py, ignores ./cli/route.py"; \
+	ln -s "$$installed" "$$t/home/.local/bin/route"; \
+	run "$$t/stub:$$PATH" || { cat "$$t/out"; fail "reinstall over an old route link failed"; }; \
+	grep -q "the command is now 'model-router'" "$$t/out" || { cat "$$t/out"; fail "no note about the old route link"; }; \
+	[ "$$(readlink "$$t/home/.local/bin/route")" = "$$installed" ] || fail "old route link was changed"; \
+	rm "$$t/home/.local/bin/route"; \
+	echo "ok: an old route link is left working, with a deprecation note"; \
+	mkdir -p "$$t/shadow"; cp "$$t/stub/claude" "$$t/shadow/model-router"; \
+	run "$$t/shadow:$$t/home/.local/bin:$$t/stub:$$PATH" || { cat "$$t/out"; fail "install with a shadowed command failed"; }; \
+	grep -q "another 'model-router' comes first" "$$t/out" || { cat "$$t/out"; fail "no note about a shadowed model-router"; }; \
+	run "$$t/home/.local/bin:$$t/stub:$$PATH" || { cat "$$t/out"; fail "install with bin dir on PATH failed"; }; \
+	grep -q "comes first\|not on your PATH" "$$t/out" && { cat "$$t/out"; fail "PATH note when model-router resolves correctly"; }; \
+	echo "ok: warns when another model-router shadows the installed one, and only then"; \
 	echo '# tampered' >> "$$t/mirror/$$ref/cli/route.py"; \
 	if run "$$t/stub:$$PATH"; then cat "$$t/out"; fail "install with bad checksum succeeded"; fi; \
 	grep -q 'checksum mismatch' "$$t/out" || { cat "$$t/out"; fail "no checksum mismatch message"; }; \
