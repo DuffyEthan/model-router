@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/DuffyEthan/model-router/main/instal
 
 Use `--plugin-only` or `--cli-only` to install just one: `... | sh -s -- --plugin-only`.
 
-The installer always downloads `route` from a pinned release tag (currently `v0.2.0`) and checks its SHA-256 against the value in `install.sh` before installing; it never copies files from the current directory. The plugin install follows the default branch, because `claude plugin install` can't pin a tag.
+The installer always downloads `route` from a pinned release tag (currently `v0.2.1`) and checks its SHA-256 against the value in `install.sh` before installing; it never copies files from the current directory. The plugin install follows the default branch, because `claude plugin install` can't pin a tag.
 
 **Or install just the plugin** from a terminal:
 
@@ -191,11 +191,9 @@ route -p "prompt"              # route, then run headless and print the answer
 route --dry-run "prompt"       # only show the decision
 route --model opus "prompt"    # skip routing
 route --floor sonnet "prompt"  # route, but never below sonnet
-route --ceiling sonnet "prompt" # route, but never above sonnet (needs a `route` newer than v0.2.0)
+route --ceiling sonnet "prompt" # route, but never above sonnet
 echo "prompt" | route -p       # prompt from stdin
 ```
-
-The installer currently pins `route` at v0.2.0, which predates `--ceiling`. To use `--ceiling` before the next release, run `cli/route.py` from a checkout of this repo. The plugin's `/router ceiling` is not affected.
 
 How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
 
