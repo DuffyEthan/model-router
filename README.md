@@ -1,6 +1,6 @@
 # model-router
 
-![model-router: Haiku, Sonnet and Opus lanes with a router in front](docs/banner.jpg)
+![model-router: a router sending prompts to Haiku (fast), Sonnet (coding) or Opus (deep reasoning)](docs/banner.jpg)
 
 Designed to reduce your [Claude Code](https://claude.com/claude-code) costs and usage by sending each prompt to the **cheapest model that can handle it**. Before your prompt is answered, Claude Haiku reads it on low effort and picks haiku, sonnet or opus plus an effort level. Trivial questions go to Haiku. Hard architecture work goes to Opus.
 
@@ -47,6 +47,8 @@ Requirements: Claude Code 2.1.275 or later for the plugin, and Python 3.9+ for t
 ## The plugin
 
 Once it's installed, routing just happens.
+
+If you use subagents or background tasks a lot, also run `/router background sonnet` once. The classifier never sees them, so by default they run on your session model, which is often Opus at full price. This sends them to Sonnet instead and is remembered across sessions. See [`/router background`](#router-background).
 
 ### How it works, step by step
 
@@ -402,6 +404,15 @@ Latest results (Claude Code 2.1.296, Haiku 5.5, 2026-10-14; full data in [`evals
 | End-to-end (6 prompts, sessions started on Opus) | **6/6** answered by the expected model: Haiku for both easy prompts, Sonnet for both coding prompts, Opus for both hard ones. API-equivalent cost per prompt, including the answer, ranged from under $0.001 (Haiku) to $0.77 (a long Opus answer); $0.91 for all six. |
 
 To tune the router, change `SYSTEM` in `register.ts`, rerun `routing_eval.py`, and compare. Add your own prompts to `cases.jsonl` so the eval matches how you actually work.
+
+## Status
+
+model-router is feature-complete and maintained on a best-effort basis. Issues and pull requests are welcome, but replies may be slow.
+
+Two things are most likely to need attention over time:
+
+- **New models.** When Anthropic ships new model IDs, add them to `MODEL_IDS` in [`register.ts`](plugin/hooks/register.ts) and to [`prices.json`](plugin/hooks/prices.json). The tests fail if a pinned model ID has no price row.
+- **Plugin API changes.** The `turn.step` and `prompt.submit` hooks are early access and may change between Claude Code releases. If routing stops working after an update, `/router off` hands control back to your session model.
 
 ## License
 
