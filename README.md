@@ -8,7 +8,7 @@ Designed to reduce your [Claude Code](https://claude.com/claude-code) costs and 
 
 It comes in two forms:
 
-| | **Plugin** (recommended) | **`route` CLI** |
+| | **Plugin** (recommended) | **`model-router` CLI** |
 |---|---|---|
 | Where it runs | Inside Claude Code: terminal, and the desktop app's Code tab | Your terminal, as a wrapper around `claude` |
 | Routing | **Every prompt**, mid-session | Once, on the first prompt of a session |
@@ -16,7 +16,7 @@ It comes in two forms:
 
 ## Install
 
-**One line**, which installs both the plugin and the `route` command:
+**One line**, which installs both the plugin and the `model-router` command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/DuffyEthan/model-router/main/install.sh | sh
@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/DuffyEthan/model-router/main/instal
 
 Use `--plugin-only` or `--cli-only` to install just one: `... | sh -s -- --plugin-only`.
 
-The installer always downloads `route` from a pinned release tag (currently `v0.2.1`) and checks its SHA-256 against the value in `install.sh` before installing; it never copies files from the current directory. The plugin install follows the default branch, because `claude plugin install` can't pin a tag.
+The installer always downloads the `model-router` command from a pinned release tag (currently `v0.2.1`) and checks its SHA-256 against the value in `install.sh` before installing; it never copies files from the current directory. The plugin install follows the default branch, because `claude plugin install` can't pin a tag.
 
 **Or install just the plugin** from a terminal:
 
@@ -185,21 +185,23 @@ At current prices, staying wins above about 5K tokens of context for Opus → So
 /router sticky off   # always follow the classifier, whatever the cache
 ```
 
-## The `route` CLI
+## The `model-router` CLI
 
 ```bash
-route "prompt"                 # route, then open interactive Claude Code on that model
-route -p "prompt"              # route, then run headless and print the answer
-route --dry-run "prompt"       # only show the decision
-route --model opus "prompt"    # skip routing
-route --floor sonnet "prompt"  # route, but never below sonnet
-route --ceiling sonnet "prompt" # route, but never above sonnet
-echo "prompt" | route -p       # prompt from stdin
+model-router "prompt"                  # route, then open interactive Claude Code on that model
+model-router -p "prompt"               # route, then run headless and print the answer
+model-router --dry-run "prompt"        # only show the decision
+model-router --model opus "prompt"     # skip routing
+model-router --floor sonnet "prompt"   # route, but never below sonnet
+model-router --ceiling sonnet "prompt" # route, but never above sonnet
+echo "prompt" | model-router -p        # prompt from stdin
 ```
+
+Before v0.2.2 this command was called `route`. That name clashes with the system's own `route` tool (`/sbin/route` on macOS and many Linux distributions), which usually comes first on `PATH`. Rerunning the installer adds `model-router` and leaves an old `route` link working, with a note on how to remove it.
 
 How it works: it runs `claude -p --model haiku --effort low` once to get the same JSON decision as the plugin, then starts a normal `claude --model X --effort Y "prompt"` session. It's simpler than the plugin, but it only decides once per session.
 
-To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. If the classifier fails (error, timeout or an unusable reply), `route` prints a note to stderr and starts `claude` with no `--model` or `--effort` from the router, so you get the session default, like the plugin. `--model` and `--effort` are checked before anything runs; an invalid value exits with an error listing the allowed ones. `--floor haiku|sonnet|opus` (default `haiku`) works like the plugin's `/router floor`: a routed model below the floor is raised to it, keeping the effort. It is checked the same way, and it doesn't change a failed classification or a model forced with `--model`. `--ceiling haiku|sonnet|opus` (default `opus`) is the plugin's `/router ceiling`: a routed model above the ceiling is lowered to it, keeping the effort, with the same exceptions. A `--floor` above the `--ceiling` exits with an error. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
+To pass other flags to `claude`, put them after `--`: `model-router "prompt" -- --permission-mode plan`. Flags written as `--flag=value` also pass straight through. If the classifier fails (error, timeout or an unusable reply), `model-router` prints a note to stderr and starts `claude` with no `--model` or `--effort` from the router, so you get the session default, like the plugin. `--model` and `--effort` are checked before anything runs; an invalid value exits with an error listing the allowed ones. `--floor haiku|sonnet|opus` (default `haiku`) works like the plugin's `/router floor`: a routed model below the floor is raised to it, keeping the effort. It is checked the same way, and it doesn't change a failed classification or a model forced with `--model`. `--ceiling haiku|sonnet|opus` (default `opus`) is the plugin's `/router ceiling`: a routed model above the ceiling is lowered to it, keeping the effort, with the same exceptions. A `--floor` above the `--ceiling` exits with an error. Decisions are logged to `~/.model-router/log.jsonl`. Each routing call costs about $0.0002, like the plugin's. It typically takes 1–3 seconds, with a 60-second timeout (the CLI's limit is longer than the plugin's 20 seconds).
 
 ## Tuning
 
@@ -245,7 +247,7 @@ These are design goals. The only usage data so far is the author's: over 10 sess
 - **Savings depend on your mix.** If most of your prompts really are hard, they go to Opus anyway and you pay the small routing overhead for nothing.
 - **Subagents aren't classified.** They keep their own configured models and effort, unless `/router background sonnet|haiku` downgrades the ones above that tier.
 - **The plugin API is early access.** The `turn.step` / `prompt.submit` hooks may change between Claude Code releases, and model IDs in `register.ts` need updating when new models ship.
-- **The CLI routes only once.** `route` picks a model for the whole session based on its first prompt. Use the plugin for per-prompt routing.
+- **The CLI routes only once.** `model-router` picks a model for the whole session based on its first prompt. Use the plugin for per-prompt routing.
 
 Prices are Anthropic API list prices from the [pricing page](https://platform.claude.com/docs/en/about-claude/pricing), as of 2026-10 (checked 2026-10-14). Per million tokens:
 
@@ -350,7 +352,7 @@ plugin/                           # the Claude Code plugin
   hooks/tracker.ts                #   routing log used by /router stats and the report
   hooks/prices.json               #   price table (source URL and date inside)
   tests/                          #   plugin tests (claude plugin test)
-cli/route.py                      # the standalone `route` wrapper
+cli/route.py                      # the standalone `model-router` command
 cli/tests/                        # CLI unit tests, including the prompt-parity check
 scripts/router_report.py          # cost & routing report (see Measure it yourself)
 scripts/tests/                    # report tests on synthetic transcripts
@@ -364,15 +366,15 @@ install.sh                        # one-line installer
 
 ```bash
 make test          # everything
-make test-cli      # Python unit tests for the route CLI (stdlib only)
+make test-cli      # Python unit tests for the model-router CLI (stdlib only)
 make test-plugin   # validates and tests the plugin with `claude plugin test` (no API calls)
 make test-scripts  # tests for scripts/router_report.py against synthetic transcripts
-make test-installer # lints install.sh and runs it offline: pinned checksum, tampered file, no hash tool
+make test-installer # lints install.sh and runs it offline: pinned checksum, tampered file, no hash tool, old route link, shadowed command
 make test-evals    # offline tests for the eval scripts (classifier calls faked)
 ```
 
 - `plugin/tests/` (`router.test.ts`, `tracker.test.ts`, `switch.test.ts`): 246 tests that run the real plugin against a mocked engine. They cover routing to each tier, full model IDs for the first-party API, Bedrock and Vertex (and leaving unrecognised IDs alone), a stale route never carrying over to slash commands or non-user turns, fail-safe behaviour (garbage replies, bad JSON, unknown models, a classifier that fails or throws), subagents being left alone, slash commands not being classified, `/router on|off|status|stats|export` including the saved off setting, and the routing log (which never stores prompt text).
-- `cli/tests/`: 63 tests for the CLI's classification, fallbacks, input validation, flag handling, stdin and logging, plus a check that its router prompt matches the plugin's.
+- `cli/tests/`: 64 tests for the CLI's classification, fallbacks, input validation, flag handling, stdin and logging, plus a check that its router prompt matches the plugin's.
 - `scripts/tests/`: 35 tests for the cost report, with costs worked out by hand, including a session with model switches and a Haiku request over 100K tokens.
 
 CI runs all of these on every push. The plugin job installs a pinned Claude Code version; the plugin tests need no login or API key.

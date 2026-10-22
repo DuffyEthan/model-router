@@ -3,8 +3,9 @@
 #   curl -fsSL https://raw.githubusercontent.com/DuffyEthan/model-router/main/install.sh | sh
 # Options: --plugin-only | --cli-only
 #
-# The 'route' CLI is always downloaded from the pinned ref below, and its
-# SHA-256 is checked against the value hard-coded here before it is installed.
+# The 'model-router' CLI (cli/route.py) is always downloaded from the pinned ref
+# below, and its SHA-256 is checked against the value hard-coded here before it
+# is installed.
 # It is never copied from the current directory, so `curl | sh` and running
 # from a checkout install the same verified file.
 set -eu
@@ -53,8 +54,8 @@ have claude || die "the 'claude' CLI is not on your PATH. Install Claude Code fi
 
 if [ "$do_cli" = 1 ]; then
   # Check prerequisites before changing anything.
-  have python3 || die "python3 is required for the 'route' command."
-  have curl || die "curl is required to download the 'route' command."
+  have python3 || die "python3 is required for the 'model-router' command."
+  have curl || die "curl is required to download the 'model-router' command."
   have sha256sum || have shasum \
     || die "sha256sum or shasum is required to verify the download; refusing to install unverified code."
 fi
@@ -65,7 +66,7 @@ if [ "$do_plugin" = 1 ]; then
 fi
 
 if [ "$do_cli" = 1 ]; then
-  echo "==> Installing the 'route' command ($MR_REF) to $BIN_DIR"
+  echo "==> Installing the 'model-router' command ($MR_REF) to $BIN_DIR"
   mkdir -p "$BIN_DIR" "$SHARE_DIR"
   tmp=$(mktemp "$SHARE_DIR/.route.py.XXXXXX")
   trap 'rm -f "$tmp"' EXIT
@@ -81,14 +82,27 @@ if [ "$do_cli" = 1 ]; then
   fi
   chmod 755 "$tmp"
   mv -f "$tmp" "$SHARE_DIR/route.py"
-  ln -sf "$SHARE_DIR/route.py" "$BIN_DIR/route"
+  ln -sf "$SHARE_DIR/route.py" "$BIN_DIR/model-router"
+  # Before v0.2.2 the command was 'route', which the system's own 'route' tool
+  # usually shadows. An old link points at the same file, so it keeps working
+  # until it's removed.
+  if [ -L "$BIN_DIR/route" ] && [ "$(readlink "$BIN_DIR/route")" = "$SHARE_DIR/route.py" ]; then
+    echo "note: the command is now 'model-router'. The old 'route' link still works but is"
+    echo "      deprecated; remove it with: rm \"$BIN_DIR/route\""
+  fi
   case ":$PATH:" in
-    *":$BIN_DIR:"*) ;;
-    *) echo "note: $BIN_DIR is not on your PATH; add it to use 'route'." ;;
+    *":$BIN_DIR:"*)
+      found=$(command -v model-router || true)
+      if [ "$found" != "$BIN_DIR/model-router" ]; then
+        echo "note: another 'model-router' comes first on your PATH ($found);"
+        echo "      run $BIN_DIR/model-router or put $BIN_DIR earlier in PATH."
+      fi
+      ;;
+    *) echo "note: $BIN_DIR is not on your PATH; add it to use 'model-router'." ;;
   esac
 fi
 
 echo "==> Done."
 [ "$do_plugin" = 1 ] && echo "    Start Claude Code and type /router to check the plugin is active."
-[ "$do_cli" = 1 ] && echo "    Try: route --dry-run \"what does ls -la do\""
+[ "$do_cli" = 1 ] && echo "    Try: model-router --dry-run \"what does ls -la do\""
 exit 0

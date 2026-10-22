@@ -4,14 +4,17 @@
 Haiku (low effort) reads your prompt and picks the cheapest model + effort that
 can handle it, then launches Claude Code with that choice.
 
+Installed as the `model-router` command (formerly `route`, which clashed with the
+system `route` tool on macOS and Linux).
+
 Usage:
-    route "your prompt"            # classify, then open interactive Claude Code
-    route -p "your prompt"         # classify, then run headless (print mode)
-    route --dry-run "your prompt"  # only show the routing decision
-    route --floor sonnet "prompt"  # never route below sonnet
-    route --ceiling sonnet "prompt"  # never route above sonnet
-    route "your prompt" -- --permission-mode plan   # flags after -- go to claude
-    echo "prompt" | route -p       # prompt from stdin
+    model-router "your prompt"            # classify, then open interactive Claude Code
+    model-router -p "your prompt"         # classify, then run headless (print mode)
+    model-router --dry-run "your prompt"  # only show the routing decision
+    model-router --floor sonnet "prompt"  # never route below sonnet
+    model-router --ceiling sonnet "prompt"  # never route above sonnet
+    model-router "your prompt" -- --permission-mode plan   # flags after -- go to claude
+    echo "prompt" | model-router -p       # prompt from stdin
 """
 
 import argparse
@@ -130,7 +133,7 @@ def apply_ceiling(decision: dict, ceiling: str) -> dict:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Route a prompt to the cheapest capable Claude model.")
+    ap = argparse.ArgumentParser(prog="model-router", description="Route a prompt to the cheapest capable Claude model.")
     ap.add_argument("prompt", nargs="*", help="prompt text (or pipe via stdin)")
     ap.add_argument("-p", "--print", action="store_true", help="run headless and print the answer")
     ap.add_argument("--dry-run", action="store_true", help="only show the routing decision")
@@ -182,9 +185,9 @@ def validate(model, effort, floor=None, ceiling=None) -> None:
     for kind, value, allowed in (("model", model, MODELS), ("effort", effort, EFFORTS),
                                  ("floor", floor, MODELS), ("ceiling", ceiling, MODELS)):
         if value is not None and value not in allowed:
-            sys.exit(f"route: invalid {kind} {value!r}; allowed: {', '.join(allowed)}")
+            sys.exit(f"model-router: invalid {kind} {value!r}; allowed: {', '.join(allowed)}")
     if floor is not None and ceiling is not None and MODELS.index(floor) > MODELS.index(ceiling):
-        sys.exit(f"route: --floor {floor} is above --ceiling {ceiling}")
+        sys.exit(f"model-router: --floor {floor} is above --ceiling {ceiling}")
 
 
 def build_command(decision: dict, passthrough: list[str], headless: bool, prompt: str) -> list[str]:

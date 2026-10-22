@@ -203,6 +203,16 @@ class ValidationTests(unittest.TestCase):
         self.assertNotIn(cm.exception.code, (0, None))
         return str(cm.exception.code), classify
 
+    def test_messages_use_the_installed_command_name(self):
+        # Installed as `model-router`; `route` clashes with the system's route tool.
+        msg, _ = self.run_invalid(["--model", "gpt-4", "do a thing"])
+        self.assertTrue(msg.startswith("model-router: "), msg)
+        with mock.patch.object(sys, "argv", ["route", "--help"]), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+             self.assertRaises(SystemExit):
+            route.main()
+        self.assertTrue(out.getvalue().startswith("usage: model-router "), out.getvalue())
+
     def test_invalid_model_flag(self):
         msg, classify = self.run_invalid(["--model", "gpt-4", "do a thing"])
         self.assertIn("invalid model 'gpt-4'", msg)
