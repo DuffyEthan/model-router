@@ -7,7 +7,7 @@ Each file here is a short, approximate write-up of what model routing cost and s
 From the repo root, against your own data:
 
 ```
-python3 scripts/router_report.py --since 2026-10-19 --until 2026-10-21 --simulate all
+python3 scripts/router_report.py --since 2026-10-20 --until 2026-10-22 --simulate all
 ```
 
 It reads transcripts from `~/.claude/projects` and the routing log from `~/.claude/plugins/store/model-router_*.json`, so you get your own numbers, not the ones in these files. Add `--json` for machine-readable output. `python3 scripts/router_report.py --help` lists the other options.
@@ -19,4 +19,4 @@ It reads transcripts from `~/.claude/projects` and the routing log from `~/.clau
 - The Opus-only baseline assumes Opus would have produced the same output length. It says nothing about answer quality.
 - The override rate (`/model` changes and `/router off` per user prompt) is a rough quality proxy only.
 - Simulated policies re-price the same requests with a modelled cache, so they are approximate. Each report prints a calibration line showing how far the model drifts from the observed figures.
-- Time spent with the router turned off counts as unrouted Opus in the actual cost, which lowers the measured savings.
+- Time spent with the router turned off saves nothing and lowers the overall figure. The report's "Router on vs off" lines show the savings for router-on requests alone.
