@@ -24,7 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/DuffyEthan/model-router/main/instal
 
 Use `--plugin-only` or `--cli-only` to install just one: `... | sh -s -- --plugin-only`.
 
-The installer always downloads the `model-router` command from a pinned release tag (currently `v0.2.1`) and checks its SHA-256 against the value in `install.sh` before installing; it never copies files from the current directory. The plugin install follows the default branch, because `claude plugin install` can't pin a tag.
+The installer always downloads the `model-router` command from a pinned release tag (currently `v0.2.2`) and checks its SHA-256 against the value in `install.sh` before installing; it never copies files from the current directory. The plugin install follows the default branch, because `claude plugin install` can't pin a tag.
 
 **Or install just the plugin** from a terminal:
 
