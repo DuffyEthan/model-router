@@ -211,6 +211,36 @@ class FixtureReport(unittest.TestCase):
         self.assertIn("Spend by source and route", text)
         self.assertIn("unrouted: classifier timeout", text)
 
+    def test_router_on_off_split(self):
+        # No prompt in the fixtures was sent with /router off, so everything is "on".
+        rep, _ = run(since="2026-10-01", until="2026-10-01")
+        on, off = rep["by_router"]["on"], rep["by_router"]["off"]
+        self.assertEqual((on["requests"], on["sessions"]), (7, 2))
+        self.assertAlmostEqual(on["net_savings_usd"], rep["net_savings_usd"], places=12)
+        self.assertEqual(off, {"requests": 0, "sessions": 0, "actual_usd": 0.0,
+                               "counterfactual_usd": 0.0, "net_savings_usd": 0.0})
+        self.assertNotIn("Router on vs off", rr.format_report(rep, defaultdict(int), PRICES, "x"))
+
+        # Mark sess-b's prompt as sent with /router off: b1, b2 and subagent x1 move to
+        # "off", and its timed-out classifier call drops out of the overhead.
+        stats = defaultdict(int)
+        log = rr.read_log([LOG], stats)
+        for r in log:
+            if r.get("session") == "sess-b" and r.get("kind") == "prompt":
+                r.update(outcome="skipped", skip="off", latencyMs=None)
+        lo, hi = rr.day_bounds("2026-10-01", "2026-10-01")
+        rep = rr.build_report(rr.read_requests(PROJECTS, stats), log, PRICES, lo, hi)
+        on, off = rep["by_router"]["on"], rep["by_router"]["off"]
+        self.assertEqual((on["requests"], on["sessions"], off["requests"], off["sessions"]), (4, 1, 3, 1))
+        self.assertAlmostEqual(on["actual_usd"], A_ACTUAL * U, places=12)
+        self.assertAlmostEqual(on["counterfactual_usd"], A_CF * U, places=12)
+        self.assertAlmostEqual(on["net_savings_usd"], (A_CF - A_ACTUAL - 215) * U, places=12)
+        self.assertAlmostEqual(off["actual_usd"], B_ACTUAL * U, places=12)
+        self.assertAlmostEqual(off["net_savings_usd"], (B_CF - B_ACTUAL) * U, places=12)
+        self.assertAlmostEqual(on["net_savings_usd"] + off["net_savings_usd"], rep["net_savings_usd"], places=12)
+        text = rr.format_report(rep, defaultdict(int), PRICES, "x")
+        self.assertIn("Router on vs off", text)
+
     def test_simulation_calibrates_on_the_fixtures(self):
         rep, _ = run(since="2026-10-01", until="2026-10-01", simulate_policies=list(rr.POLICIES))
         sims = rep["simulations"]

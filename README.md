@@ -215,7 +215,7 @@ To pass other flags to `claude`, put them after `--`: `route "prompt" -- --permi
 - **Hard work still gets Opus.** The router leans toward the cheaper tier only when two tiers are close. High-stakes work (production data, security, irreversible actions) is pushed up, not down.
 - **It works on subscriptions.** On Pro/Max, cheaper models use up less of your usage limits, so the aim is that you hit them later.
 
-These are design goals. There's no real-world usage data yet showing how much it saves in practice.
+These are design goals. The only usage data so far is the author's: over 10 sessions in October 2026, the router-on turns cost about 29% less than the same work on Opus alone (see [`docs/savings/`](docs/savings/)). That's one person over two days, so measure your own with [`scripts/router_report.py`](#measure-it-yourself).
 
 ### Drawbacks
 
@@ -281,6 +281,7 @@ It prints:
 - the actual cost at API list prices, labelled **API-equivalent**;
 - an **Opus-only counterfactual**, with the same tokens priced at Opus;
 - **net savings**, with the switch cache penalty and the classifier overhead on separate lines;
+- the same figures split into **router on vs off**, when some prompts were sent with `/router off`, so time with the router off doesn't dilute the savings;
 - the **override rate**: `/model` changes and `/router off` per user prompt.
 
 Requests from before a session's first routing-log record, such as the start of the session you installed the plugin in, are shown on the scope line as **before routing log** with their cost. They are left out of every other figure, because the router wasn't running for them.
@@ -370,7 +371,7 @@ make test-evals    # offline tests for the eval scripts (classifier calls faked)
 
 - `plugin/tests/` (`router.test.ts`, `tracker.test.ts`, `switch.test.ts`): 246 tests that run the real plugin against a mocked engine. They cover routing to each tier, full model IDs for the first-party API, Bedrock and Vertex (and leaving unrecognised IDs alone), a stale route never carrying over to slash commands or non-user turns, fail-safe behaviour (garbage replies, bad JSON, unknown models, a classifier that fails or throws), subagents being left alone, slash commands not being classified, `/router on|off|status|stats|export` including the saved off setting, and the routing log (which never stores prompt text).
 - `cli/tests/`: 63 tests for the CLI's classification, fallbacks, input validation, flag handling, stdin and logging, plus a check that its router prompt matches the plugin's.
-- `scripts/tests/`: 30 tests for the cost report, with costs worked out by hand, including a session with model switches and a Haiku request over 100K tokens.
+- `scripts/tests/`: 35 tests for the cost report, with costs worked out by hand, including a session with model switches and a Haiku request over 100K tokens.
 
 CI runs all of these on every push. The plugin job installs a pinned Claude Code version; the plugin tests need no login or API key.
 
